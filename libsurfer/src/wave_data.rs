@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use egui::{Id, Pos2};
+use egui::{Color32, Id, Pos2};
 use eyre::{Result, WrapErr as _};
 use num::bigint::ToBigInt as _;
 use num::{BigInt, BigUint, One, ToPrimitive, Zero};
@@ -109,6 +109,73 @@ pub struct WaveData {
     /// Cached effective time offset, updated on waveform load and config change
     #[serde(skip, default)]
     pub(crate) cached_time_range: TimeRange,
+    /// Ephemeral, sparse per-cell value overrides keyed by row then time.
+    /// Never persisted. Any client - including JS via inject_message - can
+    /// place/clear a cell here through `Message::SetWaveCell`. The arrow-key
+    /// pulse (see `pulse_cursor`) is just one mobile client of this store,
+    /// not a separate mechanism.
+    #[serde(skip, default)]
+    pub wave_overrides: HashMap<VisibleItemIndex, BTreeMap<BigInt, CellValue>>,
+    /// The (row, time) cell in `wave_overrides` currently owned/moved by the
+    /// arrow-key pulse. `None` until the first arrow-key press.
+    #[serde(skip, default)]
+    pub pulse_cursor: Option<PulseCursor>,
+}
+
+/// The arrow-key pulse owns two cells in `wave_overrides`: a rising edge at
+/// `rise_time` and a matching falling edge at `fall_time`, so it renders as a
+/// narrow blip instead of a signal that stays high all the way to whatever
+/// the next defined cell (or the row's right edge) happens to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulseCursor {
+    pub vidx: VisibleItemIndex,
+    pub rise_time: BigInt,
+    pub fall_time: BigInt,
+}
+
+/// A single placed value in `WaveData::wave_overrides`. `color`, when set,
+/// overrides the row's normal theme color for the segment starting at this
+/// cell (via `ValueKind::Custom`); `None` renders with the usual theme color,
+/// same as before per-cell color existed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellValue {
+    pub value: String,
+    pub color: Option<Color32>,
+}
+
+impl WaveData {
+    /// Place (`Some`) or clear (`None`) an arbitrary value at a given row/time
+    /// in the ephemeral wave-cell override store. `color` is ignored when
+    /// clearing.
+    pub fn set_wave_cell(
+        &mut self,
+        vidx: VisibleItemIndex,
+        time: BigInt,
+        value: Option<String>,
+        color: Option<Color32>,
+    ) {
+        match value {
+            Some(v) => {
+                self.wave_overrides
+                    .entry(vidx)
+                    .or_default()
+                    .insert(time, CellValue { value: v, color });
+            }
+            None => {
+                if let Some(row) = self.wave_overrides.get_mut(&vidx) {
+                    row.remove(&time);
+                    if row.is_empty() {
+                        self.wave_overrides.remove(&vidx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Visual width, in time units, of the arrow-key pulse's blip.
+    pub fn pulse_width(&self) -> BigInt {
+        BigInt::from(25)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +334,8 @@ impl WaveData {
             cache_generation: self.cache_generation + 1, // Invalidate all existing caches
             inflight_caches: HashMap::new(),
             cached_time_range: TimeRange::default(),
+            wave_overrides: HashMap::new(),
+            pulse_cursor: None,
         };
 
         new_wavedata.update_metadata(translators);
@@ -1272,6 +1341,8 @@ mod tests {
                 start: BigInt::from(0),
                 end: BigInt::from(0),
             },
+            wave_overrides: HashMap::new(),
+            pulse_cursor: None,
         }
     }
 

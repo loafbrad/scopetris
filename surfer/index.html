@@ -6,6 +6,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 
 <head>
+    <!-- If no waveform is requested via the URL, redirect to load the default blank demo
+         project (24 undriven signals) so first-time visitors see a populated wave view. -->
+    <script>
+        (function () {
+            var params = new URLSearchParams(window.location.search);
+            if (!params.has('load_url') && !params.has('startup_commands')) {
+                // Surfer fetches load_url with reqwest (a runtime fetch, not a page
+                // resource), so a normal/hard page reload does NOT bypass the browser's
+                // HTTP cache for it. Cache-bust with a timestamp so local edits to
+                // blank_demo.vcd always show up on the next bare-URL visit.
+                var demoUrl = new URL('blank_demo.vcd', window.location.href);
+                demoUrl.searchParams.set('v', Date.now().toString());
+                params.set('load_url', demoUrl.href);
+                // Runs once the file above has loaded; adds every signal in the top-level
+                // "blank_demo" scope to the wave view.
+                params.set('startup_commands', 'scope_add blank_demo');
+                window.location.replace(window.location.pathname + '?' + params.toString() + window.location.hash);
+            }
+        })();
+    </script>
+
     <!-- change this to your project name -->
     <title>Surfer</title>
 
@@ -28,6 +49,7 @@
     <link data-trunk rel="copy-file", href="assets/integration.js" />
     <link data-trunk rel="copy-file" href="assets/sw.js" />
     <link data-trunk rel="copy-file" href="assets/manifest.json" />
+    <link data-trunk rel="copy-file" href="assets/blank_demo.vcd" />
 
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="white">

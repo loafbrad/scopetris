@@ -936,6 +936,7 @@ impl SystemState {
         self.timing.borrow_mut().end("Wave drawing");
 
         let viewport = &waves.viewports[viewport_idx];
+        self.draw_wave_overrides(waves, &sorted_drawing_infos, frame_width, range, viewport, &mut ctx);
         waves.draw_graphics(&mut ctx, viewport, &self.user.config.theme);
 
         //Draw cursor and allow measure if no annotation is currently being drawn
@@ -1052,6 +1053,12 @@ impl SystemState {
 
             match drawing_info {
                 ItemDrawingInfo::Variable(variable_info) => {
+                    // Wave-cell overrides (including the arrow-key pulse, one of
+                    // their clients) replace this row's real trace entirely - skip
+                    // drawing it so they don't overlay on top of it.
+                    if waves.wave_overrides.contains_key(&variable_info.vidx) {
+                        continue;
+                    }
                     if let Some(commands) = draw_commands.get(&variable_info.displayed_field_ref) {
                         let height_scaling_factor = displayed_item.map_or(
                             1.0,
@@ -1542,6 +1549,159 @@ impl SystemState {
                     FontId::monospace(text_size),
                     text_color,
                 );
+            }
+        }
+    }
+
+    /// Draws every row that has wave-cell overrides (see `WaveData::wave_overrides`,
+    /// `WaveData::set_wave_cell`) as that row's entire visible trace: flat low,
+    /// then each placed value in time order, flat low again - using the same
+    /// painter primitive as a real digital signal. `draw_wave_data` skips drawing
+    /// the real trace for these rows (see the `wave_overrides` check there), so
+    /// the overrides read as that row's own waveform line rather than shapes
+    /// floating on top of it. The arrow-key pulse is just one client that writes
+    /// into this same store (see `Message::PulseMoveVertical`/`PulseMoveHorizontal`
+    /// handlers). Not backed by any real signal data and never persisted.
+    fn draw_wave_overrides(
+        &self,
+        waves: &WaveData,
+        sorted_drawing_infos: &[&ItemDrawingInfo],
+        frame_width: f32,
+        range: &TimeRange,
+        viewport: &Viewport,
+        ctx: &mut DrawingContext,
+    ) {
+        if waves.wave_overrides.is_empty() {
+            return;
+        }
+
+        let zero_y = (ctx.to_screen)(0., 0.).y;
+        let left_time = viewport.as_time_bigint(0.0, frame_width, range);
+        let right_time = viewport.as_time_bigint(frame_width, frame_width, range);
+        let mk = |t: BigInt, v: &str, kind: ValueKind| -> (f32, DrawnRegion) {
+            let x = viewport.pixel_from_time(&t, frame_width, range);
+            (
+                x,
+                DrawnRegion {
+                    inner: Some(TranslatedValue::new(&v, kind)),
+                    force_anti_alias: false,
+                    trace_value: TraceValue::Normal,
+                },
+            )
+        };
+
+        let color = self.user.config.theme.variable_default;
+        let line_width = self.user.config.theme.linewidth;
+        let draw_background = self.fill_high_values();
+
+        // Row scrolled out of view this frame -> it just won't be in
+        // sorted_drawing_infos and is silently skipped, no auto-scroll.
+        for info in sorted_drawing_infos.iter().copied() {
+            let Some(row) = waves.wave_overrides.get(&info.vidx()) else {
+                continue;
+            };
+            if row.is_empty() {
+                // Shouldn't happen - set_wave_cell removes empty rows - but be defensive.
+                continue;
+            }
+
+            let y_offset = info.top() - zero_y + self.user.config.layout.waveforms_gap;
+
+            // The row's real variable decides how its overrides render: a 1-bit
+            // variable gets the boolean high/low line the arrow-key pulse relies
+            // on, anything else (including no variable metadata at all) gets the
+            // multi-bit "value in a box" rendering.
+            let displayed_item = waves
+                .items_tree
+                .get_visible(info.vidx())
+                .and_then(|node| waves.displayed_items.get(&node.item_ref));
+            let num_bits = if let Some(DisplayedItem::Variable(variable)) = displayed_item {
+                waves
+                    .inner
+                    .as_waves()
+                    .and_then(|w| w.variable_meta(&variable.variable_ref).ok())
+                    .and_then(|meta| meta.num_bits)
+            } else {
+                None
+            };
+            let is_vector = matches!(num_bits, Some(n) if n != 1);
+
+            if is_vector {
+                let mut points = Vec::with_capacity(row.len() + 2);
+                let starts_at_left = row.iter().next().is_some_and(|(t, _)| *t == left_time);
+                if !starts_at_left {
+                    points.push(mk(left_time.clone(), "x", ValueKind::Undef));
+                }
+                points.extend(row.iter().map(|(t, cell)| {
+                    let kind = cell.color.map_or(ValueKind::Normal, ValueKind::Custom);
+                    mk(t.clone(), &cell.value, kind)
+                }));
+                let ends_at_right = row.iter().next_back().is_some_and(|(t, _)| *t == right_time);
+                if !ends_at_right {
+                    let (_, last) = row.iter().next_back().expect("row is non-empty");
+                    let kind = last.color.map_or(ValueKind::Normal, ValueKind::Custom);
+                    points.push(mk(right_time.clone(), &last.value, kind));
+                }
+
+                let background_color = self.get_background_color(waves, info.vidx(), info.vidx().0);
+                let text_color = self.user.config.theme.get_best_text_color(background_color);
+                for (old, new) in points.iter().zip(points.iter().skip(1)) {
+                    self.draw_region(
+                        (old, new),
+                        color,
+                        y_offset,
+                        1.0,
+                        ctx,
+                        text_color,
+                        line_width,
+                        None,
+                    );
+                }
+            } else {
+                // bool_drawing_spec treats ValueKind::Custom as an undefined-like
+                // state (half height, no background fill) - it isn't meant to carry
+                // "high value with a custom color". So keep ValueKind::Normal here
+                // for correct height/fill, and instead pass each segment's custom
+                // color (if any) as draw_bool_transition's own color argument.
+                let mut points = Vec::with_capacity(row.len() + 2);
+                let mut colors = Vec::with_capacity(row.len() + 2);
+                let starts_at_left_zero = row
+                    .iter()
+                    .next()
+                    .is_some_and(|(t, cell)| *t == left_time && cell.value == "0");
+                if !starts_at_left_zero {
+                    points.push(mk(left_time.clone(), "0", ValueKind::Normal));
+                    colors.push(color);
+                }
+                for (t, cell) in row.iter() {
+                    points.push(mk(t.clone(), &cell.value, ValueKind::Normal));
+                    colors.push(cell.color.unwrap_or(color));
+                }
+                // Extend (hold) the row's last real value to the right edge, same as
+                // the vector branch - don't force it back to "0". A row whose last
+                // placed value is "1" (e.g. a border/framing row that should stay
+                // high) must actually stay high, not get yanked back down.
+                let ends_at_right = row.iter().next_back().is_some_and(|(t, _)| *t == right_time);
+                if !ends_at_right {
+                    let (_, last) = row.iter().next_back().expect("row is non-empty");
+                    points.push(mk(right_time.clone(), &last.value, ValueKind::Normal));
+                    colors.push(last.color.unwrap_or(color));
+                }
+
+                for (pair, &segment_color) in points.windows(2).zip(colors.iter()) {
+                    self.draw_bool_transition(
+                        (&pair[0], &pair[1]),
+                        false,
+                        segment_color,
+                        y_offset,
+                        1.0,
+                        false,
+                        draw_background,
+                        line_width,
+                        None,
+                        ctx,
+                    );
+                }
             }
         }
     }

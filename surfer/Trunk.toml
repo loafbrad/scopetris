@@ -3,10 +3,335 @@ pattern_script = """
     <script type=\"module\">
         import init from '{base}{js}';
         await init({module_or_path: '{base}{wasm}'});
-        import {WebHandle, inject_message, id_of_name, draw_text_arrow} from '{base}{js}';
+        import {WebHandle, inject_message, id_of_name, draw_text_arrow, index_of_name} from '{base}{js}';
         window.inject_message = inject_message;
         window.id_of_name = id_of_name;
         window.draw_text_arrow = draw_text_arrow;
+        window.index_of_name = index_of_name;
+        if (new URLSearchParams(location.search).get('load_url')?.includes('blank_demo.vcd')) {
+            (async () => {
+                const resolve = async (name) => {
+                    let idx = null;
+                    // index_of_name resolves Option::None to JS `undefined`, not `null` -
+                    // use == to catch both, or a stray `undefined` vidx silently breaks
+                    // every SetWaveCell call below (JSON.stringify drops undefined fields).
+                    while (idx == null) {
+                        idx = await window.index_of_name(name);
+                        if (idx == null) await new Promise(r => setTimeout(r, 200));
+                    }
+                    return idx;
+                };
+                const counterVidx = await resolve('blank_demo.counter');
+
+                // 10x20 Tetris grid: one row (blank_demo.sig_3..sig_22) per grid
+                // row, one CELL-wide time slot per grid column. MARGIN_COLS shifts
+                // every grid column right by a few segments so the border row (see
+                // below) has room to show a leading high segment before the field.
+                const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 2;
+                const colTime = (c) => (MARGIN_COLS + c) * CELL;
+                const rowVidx = await Promise.all(
+                    Array.from({ length: ROWS }, (_, i) => resolve('blank_demo.sig_' + (i + 3)))
+                );
+                const borderVidx = await resolve('blank_demo.sig_23');
+
+                const setCell = (vidx, t, value, color) => window.inject_message(JSON.stringify({
+                    SetWaveCell: { vidx: vidx, time: t === 0 ? [0, []] : [1, [t]], value: value, color: color }
+                }));
+                // Border: high, low across exactly the play field's width, high again
+                // - "----______----" - on every grid row so the walls run the full
+                // height of the field, plus one extra row below it as a floor cap.
+                const drawBorderRow = (v) => {
+                    setCell(v, 0, '1', null);
+                    setCell(v, colTime(0), '0', null);
+                    setCell(v, colTime(COLS), '1', null);
+                };
+                for (const v of rowVidx) drawBorderRow(v);
+                drawBorderRow(borderVidx);
+
+                const holdVidx = await resolve('blank_demo.sig_24');
+
+                // Each piece: color plus 4 rotation states, each a list of [row,col]
+                // cell offsets within a 4x4 box. Standard SRS-like flat/spawn shapes.
+                const PIECES = {
+                    I: { color: [0, 255, 255, 255], rotations: [
+                        [[1, 0], [1, 1], [1, 2], [1, 3]],
+                        [[0, 2], [1, 2], [2, 2], [3, 2]],
+                        [[2, 0], [2, 1], [2, 2], [2, 3]],
+                        [[0, 1], [1, 1], [2, 1], [3, 1]],
+                    ] },
+                    O: { color: [255, 255, 0, 255], rotations: [
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                    ] },
+                    T: { color: [160, 0, 240, 255], rotations: [
+                        [[0, 1], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [1, 1], [1, 2], [2, 1]],
+                        [[1, 0], [1, 1], [1, 2], [2, 1]],
+                        [[0, 1], [1, 0], [1, 1], [2, 1]],
+                    ] },
+                    S: { color: [0, 255, 0, 255], rotations: [
+                        [[0, 1], [0, 2], [1, 0], [1, 1]],
+                        [[0, 1], [1, 1], [1, 2], [2, 2]],
+                        [[1, 1], [1, 2], [2, 0], [2, 1]],
+                        [[0, 0], [1, 0], [1, 1], [2, 1]],
+                    ] },
+                    Z: { color: [255, 0, 0, 255], rotations: [
+                        [[0, 0], [0, 1], [1, 1], [1, 2]],
+                        [[0, 2], [1, 1], [1, 2], [2, 1]],
+                        [[1, 0], [1, 1], [2, 1], [2, 2]],
+                        [[0, 1], [1, 0], [1, 1], [2, 0]],
+                    ] },
+                    J: { color: [0, 0, 255, 255], rotations: [
+                        [[0, 0], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [0, 2], [1, 1], [2, 1]],
+                        [[1, 0], [1, 1], [1, 2], [2, 2]],
+                        [[0, 1], [1, 1], [2, 0], [2, 1]],
+                    ] },
+                    L: { color: [255, 165, 0, 255], rotations: [
+                        [[0, 2], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [1, 1], [2, 1], [2, 2]],
+                        [[1, 0], [1, 1], [1, 2], [2, 0]],
+                        [[0, 0], [0, 1], [1, 1], [2, 1]],
+                    ] },
+                };
+                const TYPES = Object.keys(PIECES);
+                const SPAWN_ROW = 0, SPAWN_COL = 3;
+
+                const board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+                let currentPiece = null;
+                let holdType = null;
+                let canHold = true;
+                let bag = [];
+
+                const shuffle = (arr) => {
+                    for (let i = arr.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [arr[i], arr[j]] = [arr[j], arr[i]];
+                    }
+                    return arr;
+                };
+
+                const cellsOfPiece = (p) => PIECES[p.type].rotations[p.rotation]
+                    .map(([dr, dc]) => [p.row + dr, p.col + dc]);
+                const canPlace = (p) => cellsOfPiece(p).every(([r, c]) =>
+                    c >= 0 && c < COLS && r >= 0 && r < ROWS && !board[r][c]);
+
+                const renderRow = (r, filled) => {
+                    for (let c = 1; c < COLS; c++) setCell(rowVidx[r], colTime(c), null, null);
+                    for (const [col, color] of filled) {
+                        if (col > 0) setCell(rowVidx[r], colTime(col), '1', color);
+                        if (col < COLS - 1) setCell(rowVidx[r], colTime(col + 1), '0', null);
+                    }
+                    // Explicit boundary endpoints, written last so a filled edge column
+                    // (0 or COLS-1) can't leave the border's own wall keys wrong.
+                    setCell(rowVidx[r], colTime(0), filled.has(0) ? '1' : '0', filled.get(0) ?? null);
+                    setCell(rowVidx[r], colTime(COLS), '1', null);
+                };
+                const renderHold = () => {
+                    if (holdType) {
+                        setCell(holdVidx, 0, '1', PIECES[holdType].color);
+                        setCell(holdVidx, colTime(4), '0', null);
+                    } else {
+                        setCell(holdVidx, 0, null, null);
+                        setCell(holdVidx, colTime(4), null, null);
+                    }
+                };
+                const renderAll = () => {
+                    const pieceCells = currentPiece ? cellsOfPiece(currentPiece) : [];
+                    for (let r = 0; r < ROWS; r++) {
+                        const filled = new Map();
+                        for (let c = 0; c < COLS; c++) {
+                            if (pieceCells.some(([pr, pc]) => pr === r && pc === c)) {
+                                filled.set(c, PIECES[currentPiece.type].color);
+                            } else if (board[r][c]) {
+                                filled.set(c, board[r][c]);
+                            }
+                        }
+                        renderRow(r, filled);
+                    }
+                    renderHold();
+                };
+
+                // Scoring: standard Tetris Guideline table (level not specified by the
+                // table itself - using the common convention: +1 level per 10 lines).
+                let score = 0, level = 1, totalLines = 0, combo = -1, lastWasDifficult = false;
+                let lastActionWasRotate = false;
+                const renderScore = () => setCell(counterVidx, 0, String(score), null);
+                const isDifficult = (cleared, spin) => cleared === 4 || spin !== 'none';
+                const basePoints = (cleared, spin, isB2B) => ({
+                    '0-mini': 100, '0-regular': 400,
+                    '1-none': 100, '1-mini': 200, '1-regular': isB2B ? 1200 : 800,
+                    '2-none': 300, '2-mini': isB2B ? 600 : 400, '2-regular': isB2B ? 1800 : 1200,
+                    '3-none': 500, '3-regular': isB2B ? 2400 : 1600,
+                    '4-none': isB2B ? 1200 : 800,
+                }[cleared + '-' + spin] ?? 0);
+                const applyScore = (cleared, spin) => {
+                    const difficult = isDifficult(cleared, spin);
+                    const isB2B = difficult && lastWasDifficult;
+                    const points = basePoints(cleared, spin, isB2B);
+
+                    combo = cleared > 0 ? combo + 1 : -1;
+                    const comboBonus = cleared > 0 && combo > 0 ? 50 * combo * level : 0;
+
+                    if (cleared > 0 || spin !== 'none') lastWasDifficult = difficult;
+
+                    const gained = points * level + comboBonus;
+                    if (gained > 0) { score += gained; renderScore(); }
+
+                    if (cleared > 0) {
+                        totalLines += cleared;
+                        level = Math.floor(totalLines / 10) + 1;
+                    }
+                };
+                const addDropScore = (rows, perRow) => {
+                    if (rows <= 0) return;
+                    score += rows * perRow * level;
+                    renderScore();
+                };
+                // Simplified 3-corner-rule T-spin detection (not full SRS kick-table
+                // rules): only counts if a T-piece's last successful action was a
+                // rotation (not a slide) and >=3 of its 4 diagonal corners are occupied
+                // at lock time. Both "front" corners (facing the point) occupied =>
+                // regular T-spin; only one front corner (both back corners occupied)
+                // => mini.
+                const detectSpin = () => {
+                    if (currentPiece.type !== 'T' || !lastActionWasRotate) return 'none';
+                    const cr = currentPiece.row + 1, cc = currentPiece.col + 1; // T's center cell in all 4 rotations
+                    const occupied = (r, c) => r < 0 || r >= ROWS || c < 0 || c >= COLS || !!(board[r] && board[r][c]);
+                    const tl = occupied(cr - 1, cc - 1), tr = occupied(cr - 1, cc + 1);
+                    const bl = occupied(cr + 1, cc - 1), br = occupied(cr + 1, cc + 1);
+                    if ([tl, tr, bl, br].filter(Boolean).length < 3) return 'none';
+                    const front = { 0: [tl, tr], 1: [tr, br], 2: [bl, br], 3: [tl, bl] }[currentPiece.rotation];
+                    return front[0] && front[1] ? 'regular' : 'mini';
+                };
+
+                let fastDrop = false;
+                let timeoutId = null;
+                const scheduleTick = (delay) => {
+                    if (timeoutId !== null) clearTimeout(timeoutId);
+                    timeoutId = setTimeout(tick, delay);
+                };
+
+                const spawnPiece = (type) => {
+                    currentPiece = { type: type ?? bag.shift() ?? (bag = shuffle([...TYPES])).shift(), rotation: 0, row: SPAWN_ROW, col: SPAWN_COL };
+                    if (bag.length === 0) bag = shuffle([...TYPES]);
+                    canHold = true;
+                    lastActionWasRotate = false;
+                    if (!canPlace(currentPiece)) {
+                        timeoutId = null;
+                        renderAll();
+                        return; // game over: stop scheduling, leave the board as-is
+                    }
+                    renderAll();
+                    scheduleTick(fastDrop ? 200 : 1000);
+                };
+
+                const clearLines = () => {
+                    const remaining = board.filter((row) => row.some((cell) => !cell));
+                    const cleared = ROWS - remaining.length;
+                    for (let i = 0; i < cleared; i++) remaining.unshift(Array(COLS).fill(null));
+                    for (let r = 0; r < ROWS; r++) board[r] = remaining[r];
+                    return cleared;
+                };
+
+                const lockPiece = () => {
+                    for (const [r, c] of cellsOfPiece(currentPiece)) {
+                        board[r][c] = PIECES[currentPiece.type].color;
+                    }
+                    const spin = detectSpin();
+                    currentPiece = null;
+                    const cleared = clearLines();
+                    applyScore(cleared, spin);
+                    spawnPiece();
+                };
+
+                const tryMove = (dRow, dCol) => {
+                    const moved = { ...currentPiece, row: currentPiece.row + dRow, col: currentPiece.col + dCol };
+                    if (!canPlace(moved)) return false;
+                    currentPiece = moved;
+                    lastActionWasRotate = false;
+                    renderAll();
+                    return true;
+                };
+
+                const tryRotate = (dir) => {
+                    const rotation = (currentPiece.rotation + dir + 4) % 4;
+                    for (const [dRow, dCol] of [[0, 0], [0, -1], [0, 1], [-1, 0]]) {
+                        const rotated = { ...currentPiece, rotation, row: currentPiece.row + dRow, col: currentPiece.col + dCol };
+                        if (canPlace(rotated)) {
+                            currentPiece = rotated;
+                            lastActionWasRotate = true;
+                            renderAll();
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const hardDrop = () => {
+                    if (!currentPiece) return;
+                    let rows = 0;
+                    while (canPlace({ ...currentPiece, row: currentPiece.row + 1 })) { currentPiece.row += 1; rows += 1; }
+                    addDropScore(rows, 2);
+                    renderAll();
+                    lockPiece();
+                };
+
+                const holdPiece = () => {
+                    if (!currentPiece || !canHold) return;
+                    const current = currentPiece.type;
+                    if (holdType === null) {
+                        holdType = current;
+                        spawnPiece();
+                    } else {
+                        const swapped = holdType;
+                        holdType = current;
+                        spawnPiece(swapped);
+                    }
+                    canHold = false;
+                    renderAll();
+                };
+
+                function tick() {
+                    if (!currentPiece) return;
+                    if (tryMove(1, 0)) {
+                        if (fastDrop) addDropScore(1, 1);
+                        scheduleTick(fastDrop ? 200 : 1000);
+                    } else {
+                        lockPiece();
+                    }
+                }
+
+                renderScore();
+                spawnPiece();
+
+                const gameKeys = ['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'KeyZ', 'KeyX', 'Shift'];
+                window.addEventListener('keydown', (e) => {
+                    if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!currentPiece) return;
+                    if (e.key === 'ArrowLeft') tryMove(0, -1);
+                    else if (e.key === 'ArrowRight') tryMove(0, 1);
+                    else if (e.key === 'ArrowUp') hardDrop();
+                    else if (e.code === 'KeyZ') tryRotate(-1);
+                    else if (e.code === 'KeyX') tryRotate(1);
+                    else if (e.key === 'Shift') holdPiece();
+                    else if (e.key === 'ArrowDown' && !fastDrop) {
+                        fastDrop = true;
+                        if (timeoutId !== null) scheduleTick(200); // snappier than waiting for the next natural tick
+                    }
+                }, { capture: true });
+                window.addEventListener('keyup', (e) => {
+                    if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.key === 'ArrowDown') fastDrop = false;
+                }, { capture: true });
+            })();
+        }
         /*SURFER_SETUP_HOOKS*/
     </script>
     """

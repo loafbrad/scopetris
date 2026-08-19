@@ -389,6 +389,8 @@ impl SystemState {
                             annotation_groups: vec![],
                             annotation_list_visible: false,
                             cached_time_range: TimeRange::default(),
+                            wave_overrides: HashMap::new(),
+                            pulse_cursor: None,
                         },
                         None,
                     ),
@@ -492,6 +494,8 @@ impl SystemState {
             annotation_groups: vec![],
             annotation_list_visible: false,
             cached_time_range: TimeRange::default(),
+            wave_overrides: HashMap::new(),
+            pulse_cursor: None,
         };
 
         let enable_time_offset = self.enable_time_offset();

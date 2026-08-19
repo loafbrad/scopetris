@@ -137,7 +137,7 @@ use crate::translation::{AnyTranslator, all_translators};
 use crate::variable_filter::{VariableIOFilterType, VariableNameFilterType};
 use crate::viewport::Viewport;
 use crate::wave_container::{ScopeRefExt, VariableRefExt, WaveContainer};
-use crate::wave_data::WaveData;
+use crate::wave_data::{PulseCursor, WaveData};
 use crate::wave_source::{LoadOptions, WaveFormat, WaveSource};
 use crate::wellen::{HeaderResult, convert_format};
 
@@ -224,6 +224,15 @@ pub enum MoveDir {
 
     #[display("down")]
     Down,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Display, PartialEq, Eq)]
+pub enum HorizontalDir {
+    #[display("left")]
+    Left,
+
+    #[display("right")]
+    Right,
 }
 
 pub enum ColorSpecifier {
@@ -496,6 +505,79 @@ impl SystemState {
                     waves.items_tree.xselect(new_focus_vidx, true);
                 }
                 waves.focused_item = Some(new_focus_vidx);
+            }
+            Message::PulseMoveVertical(direction) => {
+                let waves = self.user.waves.as_mut()?;
+                let visible_item_cnt = waves.items_tree.iter_visible().count();
+                if visible_item_cnt == 0 {
+                    return None;
+                }
+
+                let cur = waves.pulse_cursor.as_ref().map_or(0, |p| p.vidx.0);
+                let new_vidx = VisibleItemIndex(match direction {
+                    MoveDir::Up => cur.saturating_sub(1),
+                    MoveDir::Down => (cur + 1).min(visible_item_cnt - 1),
+                });
+                let rise_time = waves
+                    .pulse_cursor
+                    .as_ref()
+                    .map_or_else(|| waves.safe_max_timestamp() / 2, |p| p.rise_time.clone());
+                let fall_time = &rise_time + waves.pulse_width();
+
+                if let Some(old) = waves.pulse_cursor.take() {
+                    waves.set_wave_cell(old.vidx, old.rise_time, None, None);
+                    waves.set_wave_cell(old.vidx, old.fall_time, None, None);
+                }
+                waves.set_wave_cell(new_vidx, rise_time.clone(), Some("1".to_string()), None);
+                waves.set_wave_cell(new_vidx, fall_time.clone(), Some("0".to_string()), None);
+                waves.pulse_cursor = Some(PulseCursor {
+                    vidx: new_vidx,
+                    rise_time,
+                    fall_time,
+                });
+            }
+            Message::PulseMoveHorizontal(direction) => {
+                let waves = self.user.waves.as_mut()?;
+                if waves.items_tree.iter_visible().count() == 0 {
+                    return None;
+                }
+
+                let max_ts = waves.safe_max_timestamp();
+                let step = (max_ts.clone() / 64u32).max(BigInt::from(1));
+                let vidx = waves
+                    .pulse_cursor
+                    .as_ref()
+                    .map_or(VisibleItemIndex(0), |p| p.vidx);
+                let cur_rise_time = waves
+                    .pulse_cursor
+                    .as_ref()
+                    .map_or_else(|| max_ts.clone() / 2, |p| p.rise_time.clone());
+                let new_rise_time = match direction {
+                    HorizontalDir::Left => (cur_rise_time - &step).max(BigInt::from(0)),
+                    HorizontalDir::Right => (cur_rise_time + &step).min(max_ts.clone()),
+                };
+                let new_fall_time = &new_rise_time + waves.pulse_width();
+
+                if let Some(old) = waves.pulse_cursor.take() {
+                    waves.set_wave_cell(old.vidx, old.rise_time, None, None);
+                    waves.set_wave_cell(old.vidx, old.fall_time, None, None);
+                }
+                waves.set_wave_cell(vidx, new_rise_time.clone(), Some("1".to_string()), None);
+                waves.set_wave_cell(vidx, new_fall_time.clone(), Some("0".to_string()), None);
+                waves.pulse_cursor = Some(PulseCursor {
+                    vidx,
+                    rise_time: new_rise_time,
+                    fall_time: new_fall_time,
+                });
+            }
+            Message::SetWaveCell {
+                vidx,
+                time,
+                value,
+                color,
+            } => {
+                let waves = self.user.waves.as_mut()?;
+                waves.set_wave_cell(vidx, time, value, color);
             }
             Message::FocusTransaction(tx_ref, tx) => {
                 if let Some(tx_ref) = tx_ref.as_ref()

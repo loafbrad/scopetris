@@ -1,10 +1,8 @@
 //! Keyboard handling.
 use egui::{Context, Event, Key, Modifiers};
-use emath::Vec2;
 
-use crate::config::ArrowKeyBindings;
 use crate::message::MessageTarget;
-use crate::{MoveDir, SystemState, message::Message, wave_data::PER_SCROLL_EVENT};
+use crate::{HorizontalDir, MoveDir, SystemState, message::Message};
 
 impl SystemState {
     pub fn handle_pressed_keys(&self, ctx: &Context, msgs: &mut Vec<Message>) {
@@ -104,66 +102,18 @@ impl SystemState {
                     }
                     (Key::F11, true, false, _) => msgs.push(Message::ToggleFullscreen),
                     (Key::ArrowRight, true, false, false) => {
-                        msgs.push(match self.user.config.behavior.arrow_key_bindings() {
-                            ArrowKeyBindings::Edge => Message::MoveCursorToTransition {
-                                next: true,
-                                variable: None,
-                                skip_zero: modifiers.shift,
-                            },
-                            ArrowKeyBindings::Scroll => Message::CanvasScroll {
-                                delta: Vec2 {
-                                    x: 0.,
-                                    y: -PER_SCROLL_EVENT,
-                                },
-                                viewport_idx: 0,
-                            },
-                        });
+                        msgs.push(Message::PulseMoveHorizontal(HorizontalDir::Right));
                     }
                     (Key::ArrowLeft, true, false, false) => {
-                        msgs.push(match self.user.config.behavior.arrow_key_bindings() {
-                            ArrowKeyBindings::Edge => Message::MoveCursorToTransition {
-                                next: false,
-                                variable: None,
-                                skip_zero: modifiers.shift,
-                            },
-                            ArrowKeyBindings::Scroll => Message::CanvasScroll {
-                                delta: Vec2 {
-                                    x: 0.,
-                                    y: PER_SCROLL_EVENT,
-                                },
-                                viewport_idx: 0,
-                            },
-                        });
+                        msgs.push(Message::PulseMoveHorizontal(HorizontalDir::Left));
                     }
                     (Key::ArrowDown, true, true, false) => msgs.push(Message::SelectNextCommand),
                     (Key::ArrowDown, true, false, false) => {
-                        if modifiers.alt {
-                            msgs.push(Message::MoveFocus(
-                                MoveDir::Down,
-                                self.get_count(),
-                                modifiers.shift,
-                            ));
-                        } else if modifiers.command {
-                            msgs.push(Message::MoveFocusedItem(MoveDir::Down, self.get_count()));
-                        } else {
-                            msgs.push(Message::VerticalScroll(MoveDir::Down, self.get_count()));
-                        }
-                        msgs.push(Message::InvalidateCount);
+                        msgs.push(Message::PulseMoveVertical(MoveDir::Down));
                     }
                     (Key::ArrowUp, true, true, false) => msgs.push(Message::SelectPrevCommand),
                     (Key::ArrowUp, true, false, false) => {
-                        if modifiers.alt {
-                            msgs.push(Message::MoveFocus(
-                                MoveDir::Up,
-                                self.get_count(),
-                                modifiers.shift,
-                            ));
-                        } else if modifiers.command {
-                            msgs.push(Message::MoveFocusedItem(MoveDir::Up, self.get_count()));
-                        } else {
-                            msgs.push(Message::VerticalScroll(MoveDir::Up, self.get_count()));
-                        }
-                        msgs.push(Message::InvalidateCount);
+                        msgs.push(Message::PulseMoveVertical(MoveDir::Up));
                     }
                     _ => {}
                 },

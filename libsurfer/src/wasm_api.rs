@@ -33,8 +33,8 @@ use crate::wasm_panic;
 use crate::wave_container::VariableRefExt;
 use crate::wave_source::CxxrtlKind;
 
-pub(crate) static MESSAGE_QUEUE: LazyLock<Mutex<Vec<Message>>> =
-    LazyLock::new(|| Mutex::new(vec![]));
+pub(crate) static MESSAGE_QUEUE: LazyLock<Mutex<VecDeque<Message>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 static QUERY_QUEUE: LazyLock<tokio::sync::Mutex<VecDeque<Callback>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(VecDeque::new()));
@@ -130,7 +130,7 @@ pub fn inject_message(message: &str) {
 
     match deser {
         Ok(message) => {
-            block_on(MESSAGE_QUEUE.lock()).push(message);
+            block_on(MESSAGE_QUEUE.lock()).push_back(message);
 
             try_repaint()
         }
@@ -183,7 +183,7 @@ pub async fn draw_text_arrow(
     let to_id = id_of_name(to_item).await.map(DisplayedItemRef);
 
     if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
-        block_on(MESSAGE_QUEUE.lock()).push(Message::AddGraphic(
+        block_on(MESSAGE_QUEUE.lock()).push_back(Message::AddGraphic(
             GraphicId(id),
             Graphic::TextArrow {
                 from: (
@@ -291,7 +291,7 @@ pub async fn start_cxxrtl() {
     MESSAGE_QUEUE
         .lock()
         .await
-        .push(Message::SetupCxxrtl(CxxrtlKind::Mailbox));
+        .push_back(Message::SetupCxxrtl(CxxrtlKind::Mailbox));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -306,7 +306,10 @@ pub async fn on_cxxrtl_sc_message(message: String) {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub async fn start_wcp() {
-    MESSAGE_QUEUE.lock().await.push(Message::SetupChannelWCP);
+    MESSAGE_QUEUE
+        .lock()
+        .await
+        .push_back(Message::SetupChannelWCP);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -332,7 +335,7 @@ pub async fn handle_wcp_cs_message(message: String) -> Result<(), JsError> {
 
 impl SystemState {
     pub(crate) fn handle_wasm_external_messages(&mut self) {
-        while let Some(msg) = block_on(MESSAGE_QUEUE.lock()).pop() {
+        while let Some(msg) = block_on(MESSAGE_QUEUE.lock()).pop_front() {
             self.update(msg);
         }
 

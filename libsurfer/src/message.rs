@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use derive_more::Debug;
-use egui::{DroppedFile, Id, Rect};
+use egui::{Color32, DroppedFile, Id, Rect};
 use emath::{Pos2, RectTransform, Vec2};
 use ftr_parser::types::Transaction;
 use num::BigInt;
@@ -29,7 +29,7 @@ use crate::translation::DynTranslator;
 use crate::viewport::ViewportStrategy;
 use crate::wave_data::ScopeType;
 use crate::{
-    MoveDir, VariableNameFilterType, WaveSource,
+    HorizontalDir, MoveDir, VariableNameFilterType, WaveSource,
     clock_highlighting::ClockHighlightType,
     config::ArrowKeyBindings,
     dialog::{OpenSiblingStateFileDialog, ReloadWaveformDialog},
@@ -108,6 +108,23 @@ pub enum Message {
     UnfocusItem,
     MoveFocus(MoveDir, CommandCount, bool),
     MoveFocusedItem(MoveDir, CommandCount),
+    /// Move the arrow-key pulse indicator to a different row.
+    PulseMoveVertical(MoveDir),
+    /// Move the arrow-key pulse indicator in time along its current row.
+    PulseMoveHorizontal(HorizontalDir),
+    /// Place (`Some`) or clear (`None`) an arbitrary value at a given row/time
+    /// in the ephemeral wave-cell override store. Not backed by real signal
+    /// data, never persisted. Reachable from JS via `inject_message` like any
+    /// other message. `color`, when set, overrides the row's usual theme
+    /// color for this segment (RGBA bytes, e.g. `[255, 0, 0, 255]` for opaque
+    /// red); omit it (or send `null`) to keep the default theme color.
+    SetWaveCell {
+        vidx: VisibleItemIndex,
+        time: BigInt,
+        value: Option<String>,
+        #[serde(default)]
+        color: Option<Color32>,
+    },
     FocusTransaction(Option<TransactionRef>, Option<Transaction>),
     VerticalScroll(MoveDir, CommandCount),
     /// Scroll in vertical direction so that the item at a given location in the list is at the top (or visible).
