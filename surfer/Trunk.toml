@@ -32,21 +32,22 @@ pattern_script = """
                 const rowVidx = await Promise.all(
                     Array.from({ length: ROWS }, (_, i) => resolve('blank_demo.sig_' + (i + 3)))
                 );
-                const borderVidx = await resolve('blank_demo.sig_23');
+                // sig_23 used to be an extra "floor cap" row drawn with this same wall
+                // pattern; it's now a real 8-bit random-changing vector (VCD data, like
+                // playfield_top) instead, so it's untouched by the override API here.
 
                 const setCell = (vidx, t, value, color) => window.inject_message(JSON.stringify({
                     SetWaveCell: { vidx: vidx, time: t === 0 ? [0, []] : [1, [t]], value: value, color: color }
                 }));
                 // Border: high, low across exactly the play field's width, high again
                 // - "----______----" - on every grid row so the walls run the full
-                // height of the field, plus one extra row below it as a floor cap.
+                // height of the field.
                 const drawBorderRow = (v) => {
                     setCell(v, 0, '1', null);
                     setCell(v, colTime(0), '0', null);
                     setCell(v, colTime(COLS), '1', null);
                 };
                 for (const v of rowVidx) drawBorderRow(v);
-                drawBorderRow(borderVidx);
 
                 const holdVidx = await resolve('blank_demo.sig_24');
 
