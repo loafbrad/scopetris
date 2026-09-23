@@ -67,6 +67,15 @@ pub struct SystemState {
     // mutability
     pub(crate) draw_data: RefCell<Vec<Option<CachedDrawData>>>,
 
+    /// The last rendered pixel width seen for each viewport, indexed by viewport_idx and
+    /// kept in lockstep with `draw_data`/`waves.viewports`. Used to detect a resize and
+    /// (when `preserve_zoom_on_resize` is enabled) rescale that viewport to hold its zoom
+    /// level constant instead of stretching/squishing onto the new width. `None` means no
+    /// width has been observed yet for that viewport (e.g. its very first frame), which
+    /// deliberately suppresses any rescale until there's a real previous width to compare
+    /// against.
+    pub(crate) last_frame_width: RefCell<Vec<Option<f32>>>,
+
     pub(crate) variable_name_info_cache: RefCell<HashMap<VariableRef, Option<VariableNameInfo>>>,
 
     /// Monotonically increasing counter incremented when translators reload, to invalidate
@@ -179,6 +188,7 @@ impl SystemState {
             url: RefCell::new(String::new()),
             command_prompt_text: RefCell::new(String::new()),
             draw_data: RefCell::new(vec![None]),
+            last_frame_width: RefCell::new(vec![None]),
             variable_name_info_cache: RefCell::new(HashMap::new()),
             translator_generation: 0,
             all_variable_rows_cache: None,

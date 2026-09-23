@@ -943,6 +943,20 @@ impl SystemState {
                     );
                 }
             }
+            Message::ViewportWidthChanged {
+                viewport_idx,
+                old_width,
+                new_width,
+            } => {
+                let waves = self.user.waves.as_mut()?;
+                if waves.max_timestamp().is_some() {
+                    let range = waves.time_range().clone();
+                    waves.viewports[viewport_idx].rescale_to_frame_width(
+                        old_width, new_width, &range,
+                    );
+                    self.invalidate_draw_commands();
+                }
+            }
             Message::VariableFormatChange(displayed_field_ref, format) => {
                 let waves = self.user.waves.as_mut()?;
                 if !self
@@ -2451,12 +2465,14 @@ impl SystemState {
                 let viewport = Viewport::new();
                 waves.viewports.push(viewport);
                 self.draw_data.borrow_mut().push(None);
+                self.last_frame_width.borrow_mut().push(None);
             }
             Message::RemoveViewport => {
                 let waves = self.user.waves.as_mut()?;
                 if waves.viewports.len() > 1 {
                     waves.viewports.pop();
                     self.draw_data.borrow_mut().pop();
+                    self.last_frame_width.borrow_mut().pop();
                     waves.last_active_viewport_idx = waves
                         .last_active_viewport_idx
                         .min(waves.viewports.len() - 1);

@@ -339,6 +339,50 @@ impl Viewport {
         self.set_viewport_to_clipped(target_left, target_right, range);
     }
 
+    /// Rescales the viewport so the time represented by one pixel (the zoom level) stays
+    /// constant when the rendered canvas width changes, instead of the default behavior of
+    /// keeping the relative (0.0..1.0) range fixed and letting it stretch/squish onto the new
+    /// pixel width. The new range is recentered on the current midpoint.
+    ///
+    /// This is a structural correction, not a user-initiated pan/zoom: it is applied
+    /// immediately (bypassing `move_strategy`) and cancels any in-flight animated move so that
+    /// move doesn't fight this correction on the next `move_viewport` call.
+    pub(crate) fn rescale_to_frame_width(
+        &mut self,
+        old_frame_width: f32,
+        new_frame_width: f32,
+        range: &TimeRange,
+    ) {
+        if old_frame_width < 1. || new_frame_width < 1. {
+            return;
+        }
+
+        // time-per-pixel = relative_width * range_length / frame_width; holding that
+        // constant means relative_width must scale WITH frame_width (a wider canvas shows
+        // more of the timeline at the same density), so the ratio is new/old, not old/new.
+        let ratio = f64::from(new_frame_width) / f64::from(old_frame_width);
+        let mid = self.midpoint();
+        let half_width = self.half_width() * ratio;
+        let new_left = mid - half_width;
+        let new_right = mid + half_width;
+
+        // Reuse set_viewport_to_clipped's existing edge_space/min_width clamping, but force
+        // it to write curr_left/curr_right immediately rather than animating toward it.
+        let saved_strategy = self.move_strategy;
+        self.move_strategy = ViewportStrategy::Instant;
+        self.set_viewport_to_clipped(new_left, new_right, range);
+        self.move_strategy = saved_strategy;
+
+        // set_target_left/set_target_right under Instant only touch curr_left/curr_right;
+        // mirror into target_*/move_start_* and clear any in-flight move so nothing stale is
+        // left over to animate toward on the next move_viewport call.
+        self.target_left = self.curr_left;
+        self.target_right = self.curr_right;
+        self.move_start_left = self.curr_left;
+        self.move_start_right = self.curr_right;
+        self.move_duration = None;
+    }
+
     pub fn handle_canvas_scroll(&mut self, deltay: f64) {
         // Scroll 5% of the viewport per scroll event.
         // One scroll event yields 50
@@ -637,6 +681,29 @@ mod tests {
         assert!(!vp.is_moving());
         assert!((vp.curr_left.0 - 0.1).abs() < 1e-6);
         assert!((vp.curr_right.0 - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rescale_to_frame_width_preserves_zoom() {
+        let mut vp = Viewport::default();
+        let range = TimeRange {
+            start: bi(0),
+            end: bi(1000),
+        };
+        vp.curr_left = Relative(0.4);
+        vp.curr_right = Relative(0.6); // width 0.2, midpoint 0.5
+        vp.target_left = vp.curr_left;
+        vp.target_right = vp.curr_right;
+
+        // Frame width halves (1000 -> 500 px): relative width should halve too (show half
+        // as much timeline, in half as many pixels), keeping time-per-pixel constant and
+        // recentered on the same midpoint.
+        vp.rescale_to_frame_width(1000.0, 500.0, &range);
+
+        let width = (vp.curr_right - vp.curr_left).0;
+        let midpoint = (vp.curr_right.0 + vp.curr_left.0) / 2.0;
+        assert!((width - 0.1).abs() < 1e-9, "width {width} != 0.1");
+        assert!((midpoint - 0.5).abs() < 1e-9, "midpoint {midpoint} != 0.5");
     }
 
     #[test]

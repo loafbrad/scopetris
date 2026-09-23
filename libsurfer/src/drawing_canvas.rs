@@ -727,6 +727,25 @@ impl SystemState {
             return;
         }
 
+        // Detect a resize of this viewport's canvas and, if enabled, queue a message to
+        // rescale it so the zoom level (time per pixel) stays constant instead of the
+        // default behavior of stretching/squishing the existing relative range onto the
+        // new width. Placed after the tiny/zero-size guard above so a transient width
+        // during layout is never tracked as "the new baseline" or compared against.
+        if self.user.config.behavior.preserve_zoom_on_resize {
+            let prev_width = self.last_frame_width.borrow()[viewport_idx];
+            if let Some(prev_width) = prev_width {
+                if prev_width != frame_width {
+                    msgs.push(Message::ViewportWidthChanged {
+                        viewport_idx,
+                        old_width: prev_width,
+                        new_width: frame_width,
+                    });
+                }
+            }
+            self.last_frame_width.borrow_mut()[viewport_idx] = Some(frame_width);
+        }
+
         let cfg = match waves.inner {
             DataContainer::Waves(_) => DrawConfig::new(
                 Vec2::new(frame_width, frame_height),

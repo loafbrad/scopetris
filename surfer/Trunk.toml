@@ -34,6 +34,25 @@ pattern_script = """
                 // below) has room to show a leading high segment before the field.
                 const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 2;
                 const colTime = (c) => (MARGIN_COLS + c) * CELL;
+
+                // Debug: log the rendered canvas size and effective on-screen width of one
+                // grid cell, to compare "does this look the same size" across machines/
+                // window sizes. blank_demo.vcd's last timestamp is #1000, so on the default
+                // zoom-to-fit viewport (curr_left=0, curr_right=1 relative to that full
+                // range - true on a fresh page load before any zoom/pan) one CELL-wide grid
+                // column covers CELL/1000 of the canvas's rendered width.
+                const TOTAL_TIME = 1000;
+                (() => {
+                    const rect = document.getElementById('the_canvas_id').getBoundingClientRect();
+                    const cellPx = rect.width * (CELL / TOTAL_TIME);
+                    console.log(
+                        '[scopetris] canvas %s x %s CSS px, devicePixelRatio %s, window %s x %s ' +
+                        '-> 1 grid cell ≈ %s px wide (assumes default zoom-to-fit)',
+                        rect.width.toFixed(1), rect.height.toFixed(1), window.devicePixelRatio,
+                        window.innerWidth, window.innerHeight, cellPx.toFixed(2)
+                    );
+                })();
+
                 const rowVidx = await Promise.all(
                     Array.from({ length: ROWS }, (_, i) => resolve('scopetris_top.sig_' + (i + 3)))
                 );

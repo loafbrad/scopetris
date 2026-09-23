@@ -181,6 +181,14 @@ pub enum Message {
         end: BigInt,
         viewport_idx: usize,
     },
+    /// The pixel width available to render a viewport's canvas changed (e.g. a window or
+    /// split-pane resize). Used to optionally preserve the current zoom level (time per
+    /// pixel) instead of stretching/squishing the existing relative range onto the new width.
+    ViewportWidthChanged {
+        viewport_idx: usize,
+        old_width: f32,
+        new_width: f32,
+    },
     /// Set cursor at time.
     CursorSet(BigInt),
     #[serde(skip)]

@@ -415,6 +415,10 @@ pub struct SurferBehavior {
     pub keep_during_reload: bool,
     /// Number of entries to keep in file history.
     pub file_history_size: usize,
+    /// When resizing the window or a split viewport, keep the current zoom level (time per
+    /// pixel) constant instead of stretching/squishing the existing view to fit the new
+    /// width.
+    pub preserve_zoom_on_resize: bool,
     /// Select the functionality bound to the arrow keys
     arrow_key_bindings: ArrowKeyBindings,
     /// Whether dragging with primary mouse button will measure time or move cursor
