@@ -37,11 +37,13 @@ pattern_script = """
 
                 // Debug: log the rendered canvas size and effective on-screen width of one
                 // grid cell, to compare "does this look the same size" across machines/
-                // window sizes. blank_demo.vcd's last timestamp is #1000, so on the default
-                // zoom-to-fit viewport (curr_left=0, curr_right=1 relative to that full
-                // range - true on a fresh page load before any zoom/pan) one CELL-wide grid
-                // column covers CELL/1000 of the canvas's rendered width.
-                const TOTAL_TIME = 1000;
+                // window sizes. blank_demo.vcd's last timestamp is #3000 (3x the original
+                // #1000, for more zoom-out headroom - see the ZoomToRange fix below), so on
+                // the default zoom-to-fit viewport (curr_left=0, curr_right=1 relative to
+                // that full range - true on a fresh page load before any zoom/pan, i.e.
+                // before that fix's ZoomToRange message has been processed yet) one
+                // CELL-wide grid column covers CELL/3000 of the canvas's rendered width.
+                const TOTAL_TIME = 3000;
                 (() => {
                     const rect = document.getElementById('the_canvas_id').getBoundingClientRect();
                     const cellPx = rect.width * (CELL / TOTAL_TIME);
