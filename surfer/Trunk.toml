@@ -32,7 +32,7 @@ pattern_script = """
                 // row, one CELL-wide time slot per grid column. MARGIN_COLS shifts
                 // every grid column right by a few segments so the border row (see
                 // below) has room to show a leading high segment before the field.
-                const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 2;
+                const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 3;
                 const colTime = (c) => (MARGIN_COLS + c) * CELL;
 
                 // Debug: log the rendered canvas size and effective on-screen width of one
@@ -98,6 +98,51 @@ pattern_script = """
                     setCell(v, colTime(COLS), '1', null);
                 };
                 for (const v of rowVidx) drawBorderRow(v);
+
+                // Fills the "wall extends forever past colTime(COLS)" region of the grid
+                // rows not used by the hold box (rows 0-4, i.e. sig_3..sig_7) with a
+                // staggered 0/1 toggle pattern, so sig_8..sig_22 read as ordinary busy
+                // waveforms out past the board instead of one flat unbroken green bar.
+                // Purely decorative and drawn once here: renderRow() never touches
+                // anything past colTime(COLS), so nothing overwrites this later.
+                // Mostly-flat with occasional short blips (1-2 CELL-widths high, then back
+                // to low) spread far apart, rather than continuously toggling - default
+                // color, same as the rest of the board.
+                const drawFillerBlips = (v, spacing, phase, blipCells) => {
+                    // +1, not exactly colTime(COLS): renderRow() unconditionally resets that
+                    // exact point back to '1' (the wall boundary) on every single frame, so a
+                    // breakpoint placed exactly there keeps getting stomped back to logic 1
+                    // right after this runs. One time-unit past it is outside renderRow()'s
+                    // reach and survives.
+                    setCell(v, colTime(COLS) + 1, '0', null);
+                    for (let t = colTime(COLS) + phase; t <= TOTAL_TIME; t += spacing) {
+                        setCell(v, t, '1', null);
+                        const end = t + blipCells * CELL;
+                        if (end <= TOTAL_TIME) setCell(v, end, '0', null);
+                    }
+                };
+                // sig_14 stays continuously toggling instead of sparse blips, for variety.
+                const drawFillerToggle = (v, period) => {
+                    setCell(v, colTime(COLS) + 1, '0', null); // see drawFillerBlips comment above
+                    for (let step = 0; ; step++) {
+                        const t = colTime(COLS) + 1 + step * period;
+                        if (t > TOTAL_TIME) break;
+                        setCell(v, t, String(step % 2), null);
+                    }
+                };
+                // sig_12, sig_19, sig_20 left fully flat (logic 0, no blips at all), for
+                // contrast against the busier rows around them.
+                const FLAT_FILLER_ROWS = new Set([9, 16, 17]);
+                const CONTINUOUS_FILLER_ROWS = new Set([11]); // sig_14
+                for (let r = 5; r < ROWS; r++) {
+                    if (FLAT_FILLER_ROWS.has(r)) {
+                        setCell(rowVidx[r], colTime(COLS) + 1, '0', null);
+                    } else if (CONTINUOUS_FILLER_ROWS.has(r)) {
+                        drawFillerToggle(rowVidx[r], 40);
+                    } else {
+                        drawFillerBlips(rowVidx[r], 400 + (r % 6) * 100, (r * 73) % 400, (r % 2) + 1);
+                    }
+                }
 
                 // Controls legend: two rows, added last (names sort after sig_24, see
                 // z_controls_1/2 in the VCD) so they land right below the board. Left
