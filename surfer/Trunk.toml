@@ -26,7 +26,7 @@ pattern_script = """
                     }
                     return idx;
                 };
-                const counterVidx = await resolve('scopetris_top.counter');
+                const counterVidx = await resolve('scopetris_top.Score');
 
                 // 10x20 Tetris grid: one row (scopetris_top.sig_3..sig_22) per grid
                 // row, one CELL-wide time slot per grid column. MARGIN_COLS shifts
@@ -260,7 +260,7 @@ pattern_script = """
                 // table itself - using the common convention: +1 level per 10 lines).
                 let score = 0, level = 1, totalLines = 0, combo = -1, lastWasDifficult = false;
                 let lastActionWasRotate = false;
-                const renderScore = () => setCell(counterVidx, 0, String(score), null);
+                const renderScore = () => setCell(counterVidx, 0, String(score), [0, 255, 255, 255]);
                 const isDifficult = (cleared, spin) => cleared === 4 || spin !== 'none';
                 const basePoints = (cleared, spin, isB2B) => ({
                     '0-mini': 100, '0-regular': 400,
@@ -316,6 +316,26 @@ pattern_script = """
                     timeoutId = setTimeout(tick, delay);
                 };
 
+                // Game over: fills every playfield column of a row with 'x' (undefined) -
+                // Surfer's built-in invalid-signal rendering, the same one that shows up
+                // if a row has no override yet - one row per 100ms step, bottom row first
+                // and climbing upward, leaving the border wall/hold box/controls legend
+                // (everything past colTime(COLS)) untouched.
+                const fillRowInvalid = (r) => {
+                    // One 'x' breakpoint per column, explicitly red: a single breakpoint at
+                    // time 0 only covers up to whatever the row's *next* pre-existing
+                    // breakpoint happens to be (the old per-column values from the last
+                    // real board render are still sitting there otherwise), leaving most of
+                    // the row showing stale board content instead of filling it.
+                    for (let c = 0; c < COLS; c++) setCell(rowVidx[r], colTime(c), 'x', [255, 0, 0, 255]);
+                };
+                const animateGameOver = async () => {
+                    for (let r = ROWS - 1; r >= 0; r--) {
+                        fillRowInvalid(r);
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+                };
+
                 const spawnPiece = (type) => {
                     currentPiece = { type: type ?? bag.shift() ?? (bag = shuffle([...TYPES])).shift(), rotation: 0, row: SPAWN_ROW, col: SPAWN_COL };
                     if (bag.length === 0) bag = shuffle([...TYPES]);
@@ -323,8 +343,13 @@ pattern_script = """
                     lastActionWasRotate = false;
                     if (!canPlace(currentPiece)) {
                         timeoutId = null;
-                        renderAll();
-                        return; // game over: stop scheduling, leave the board as-is
+                        renderAll(); // show the piece stuck at spawn for a moment first
+                        // Null it out so tryMove/tryRotate/hardDrop/holdPiece's own
+                        // "if (!currentPiece) return" guards ignore input during the fill
+                        // animation, instead of re-rendering (and undoing) it mid-flight.
+                        currentPiece = null;
+                        animateGameOver();
+                        return; // game over: stop scheduling, board fills with 'x' instead
                     }
                     renderAll();
                     scheduleTick(fastDrop ? 100 : 1000);
