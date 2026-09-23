@@ -53,6 +53,30 @@ pattern_script = """
                     );
                 })();
 
+                // Fix the *initial* zoom to a device-independent absolute scale, instead of
+                // the default zoom-to-fit (which shows the VCD's full 0..1000 range
+                // regardless of canvas width, making the board bigger on wider screens and
+                // smaller on narrower ones - confirmed via the debug log above: 28.80px/cell
+                // on a 1440px-wide canvas vs 51.20px/cell on a 2560px-wide one).
+                // preserve_zoom_on_resize (Rust-side, default_config.toml) keeps it steady
+                // across later resizes; this fixes where it starts, using the same 1.44
+                // px-per-time-unit reference (1440px canvas / 1000 total time units) that
+                // looked right during development. Runs after the file has loaded (the
+                // counterVidx resolve above only succeeds once it has), since ZoomToRange is
+                // a no-op if the waveform's timestamps aren't known yet.
+                const REFERENCE_PX_PER_TIME_UNIT = 1.44;
+                {
+                    const canvasWidth = document
+                        .getElementById('the_canvas_id')
+                        .getBoundingClientRect().width;
+                    const visibleTimeUnits = Math.max(
+                        1, Math.round(canvasWidth / REFERENCE_PX_PER_TIME_UNIT)
+                    );
+                    window.inject_message(JSON.stringify({
+                        ZoomToRange: { start: [0, []], end: [1, [visibleTimeUnits]], viewport_idx: 0 },
+                    }));
+                }
+
                 const rowVidx = await Promise.all(
                     Array.from({ length: ROWS }, (_, i) => resolve('scopetris_top.sig_' + (i + 3)))
                 );
