@@ -565,6 +565,7 @@ impl SystemState {
             b("About", Message::SetAboutVisible(true)).add_closing_menu(msgs, ui);
         });
         ui.hyperlink_to("LinkedIn", "https://www.linkedin.com/in/bradleyboccuzzi/");
+        ui.hyperlink_to("GitHub", "https://github.com/loafbrad/scopetris");
     }
 
     pub fn hierarchy_menu(&self, msgs: &mut Vec<Message>, ui: &mut Ui) {
