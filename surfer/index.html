@@ -6,26 +6,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 
 <head>
-    <!-- If no waveform is requested via the URL, redirect to load the default blank demo
-         project (24 undriven signals) so first-time visitors see a populated wave view. -->
-    <script>
-        (function () {
-            var params = new URLSearchParams(window.location.search);
-            if (!params.has('load_url') && !params.has('startup_commands')) {
-                // Surfer fetches load_url with reqwest (a runtime fetch, not a page
-                // resource), so a normal/hard page reload does NOT bypass the browser's
-                // HTTP cache for it. Cache-bust with a timestamp so local edits to
-                // blank_demo.vcd always show up on the next bare-URL visit.
-                var demoUrl = new URL('blank_demo.vcd', window.location.href);
-                demoUrl.searchParams.set('v', Date.now().toString());
-                params.set('load_url', demoUrl.href);
-                // Runs once the file above has loaded; adds every signal in the top-level
-                // "blank_demo" scope to the wave view.
-                params.set('startup_commands', 'scope_add blank_demo');
-                window.location.replace(window.location.pathname + '?' + params.toString() + window.location.hash);
-            }
-        })();
-    </script>
+    <!-- If no waveform is requested via the URL, the Rust startup code (see
+         vcd_from_url in libsurfer/src/wasm_api.rs) falls back to loading the
+         built-in blank demo project itself, so first-time visitors see a
+         populated wave view without load_url/startup_commands ever appearing
+         in the address bar. -->
 
     <!-- change this to your project name -->
     <title>Surfer</title>

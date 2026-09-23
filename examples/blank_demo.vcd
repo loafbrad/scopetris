@@ -5,7 +5,7 @@ $version
    Surfer blank demo
 $end
 $timescale 1ns $end
-$scope module blank_demo $end
+$scope module scopetris_top $end
 $var wire 1 ! clk $end
 $var wire 8 " counter $end
 $var wire 8 9 playfield_top $end
@@ -31,6 +31,8 @@ $var wire 1 5 sig_21 $end
 $var wire 1 6 sig_22 $end
 $var wire 1 7 sig_23 $end
 $var wire 1 8 sig_24 $end
+$var wire 8 : z_controls_1 $end
+$var wire 8 ; z_controls_2 $end
 $upscope $end
 $enddefinitions $end
 #0
@@ -60,6 +62,8 @@ x5
 x6
 07
 x8
+0:
+0;
 $end
 #10
 b00001100 9

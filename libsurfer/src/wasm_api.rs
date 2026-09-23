@@ -364,14 +364,42 @@ impl StartupParams {
 
 #[cfg(all(target_arch = "wasm32", not(feature = "vscode")))]
 fn vcd_from_url() -> UrlArgs {
-    let search_params = web_sys::window()
+    let window = web_sys::window();
+    let search_params = window
+        .as_ref()
         .and_then(|window| window.location().search().ok())
         .and_then(|l| web_sys::UrlSearchParams::new_with_str(&l).ok());
 
-    UrlArgs {
-        load_url: search_params.as_ref().and_then(|p| p.get("load_url")),
-        startup_commands: search_params
+    let load_url = search_params.as_ref().and_then(|p| p.get("load_url"));
+    let startup_commands = search_params
+        .as_ref()
+        .and_then(|p| p.get("startup_commands"));
+
+    // No waveform was requested via the URL: fall back to the built-in blank
+    // demo project so first-time visitors see a populated wave view. This used
+    // to be done with a client-side redirect in index.html that appended
+    // load_url/startup_commands to the visible URL and never removed them;
+    // doing the fallback here instead means the address bar never changes.
+    if load_url.is_none() && startup_commands.is_none() {
+        let demo_url = window
             .as_ref()
-            .and_then(|p| p.get("startup_commands")),
+            .and_then(|window| window.location().href().ok())
+            .and_then(|href| web_sys::Url::new_with_base("blank_demo.vcd", &href).ok());
+        if let Some(demo_url) = demo_url {
+            // Cache-bust: reqwest (a runtime fetch, not a page resource) respects
+            // the HTTP cache, so a hard reload alone won't pick up a locally
+            // edited blank_demo.vcd without this.
+            let v = wasm_bindgen_futures::js_sys::Date::now() as u64;
+            demo_url.search_params().set("v", &v.to_string());
+            return UrlArgs {
+                load_url: Some(demo_url.href()),
+                startup_commands: Some("scope_add scopetris_top".to_string()),
+            };
+        }
+    }
+
+    UrlArgs {
+        load_url,
+        startup_commands,
     }
 }

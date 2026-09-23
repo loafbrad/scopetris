@@ -8,7 +8,12 @@ pattern_script = """
         window.id_of_name = id_of_name;
         window.draw_text_arrow = draw_text_arrow;
         window.index_of_name = index_of_name;
-        if (new URLSearchParams(location.search).get('load_url')?.includes('blank_demo.vcd')) {
+        // No load_url in the visible URL at all means Rust's own startup fallback
+        // (see vcd_from_url in libsurfer/src/wasm_api.rs) is loading blank_demo.vcd
+        // by default, so the hack below still applies; an explicit load_url that
+        // points elsewhere means a different file is being viewed, so skip it.
+        const requestedLoadUrl = new URLSearchParams(location.search).get('load_url');
+        if (!requestedLoadUrl || requestedLoadUrl.includes('blank_demo.vcd')) {
             (async () => {
                 const resolve = async (name) => {
                     let idx = null;
@@ -21,16 +26,16 @@ pattern_script = """
                     }
                     return idx;
                 };
-                const counterVidx = await resolve('blank_demo.counter');
+                const counterVidx = await resolve('scopetris_top.counter');
 
-                // 10x20 Tetris grid: one row (blank_demo.sig_3..sig_22) per grid
+                // 10x20 Tetris grid: one row (scopetris_top.sig_3..sig_22) per grid
                 // row, one CELL-wide time slot per grid column. MARGIN_COLS shifts
                 // every grid column right by a few segments so the border row (see
                 // below) has room to show a leading high segment before the field.
                 const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 2;
                 const colTime = (c) => (MARGIN_COLS + c) * CELL;
                 const rowVidx = await Promise.all(
-                    Array.from({ length: ROWS }, (_, i) => resolve('blank_demo.sig_' + (i + 3)))
+                    Array.from({ length: ROWS }, (_, i) => resolve('scopetris_top.sig_' + (i + 3)))
                 );
                 // sig_23 used to be an extra "floor cap" row drawn with this same wall
                 // pattern; it's now a real 8-bit random-changing vector (VCD data, like
@@ -49,7 +54,15 @@ pattern_script = """
                 };
                 for (const v of rowVidx) drawBorderRow(v);
 
-                const holdVidx = await resolve('blank_demo.sig_24');
+                // Controls legend: two rows, added last (names sort after sig_24, see
+                // z_controls_1/2 in the VCD) so they land right below the board. Left
+                // adjusted at time 0 - no gap. They're >1 bit wide so SetWaveCell renders
+                // them as text boxes rather than boolean level lines.
+                const [controls1Vidx, controls2Vidx] = await Promise.all(
+                    ['scopetris_top.z_controls_1', 'scopetris_top.z_controls_2'].map(resolve)
+                );
+                setCell(controls1Vidx, 0, 'Left/Right: Move   |   Down: Soft Drop   |   Up: Hard Drop', null);
+                setCell(controls2Vidx, 0, 'Z: Rotate Left   |   X: Rotate Right   |   Shift: Hold', null);
 
                 // Each piece: color plus 4 rotation states, each a list of [row,col]
                 // cell offsets within a 4x4 box. Standard SRS-like flat/spawn shapes.
@@ -130,17 +143,58 @@ pattern_script = """
                     setCell(rowVidx[r], colTime(0), filled.has(0) ? '1' : '0', filled.get(0) ?? null);
                     setCell(rowVidx[r], colTime(COLS), '1', null);
                 };
-                const renderHold = () => {
+                // Hold-piece box: reuses the top 5 grid rows (rowVidx[0..4], the same
+                // signals as the playfield's own top rows) drawn further right in time,
+                // past the board's right wall - genuinely the same rows as the board,
+                // just offset horizontally, rather than a separate block of rows above
+                // or below it. Centers each piece by its *actual* occupied cells (not
+                // the nominal 4x4 rotation grid, which would put e.g. the 1x4 I piece
+                // off-center) - a fixed offset only centers pieces that happen to fill
+                // their whole 4x4 box, which none of these shapes do. No border: at 5x5
+                // a full ring would leave just 3 columns of interior, too narrow for the
+                // I piece to even fit, let alone center.
+                const HOLD_COL_START = COLS + 2, HOLD_SIZE = 5;
+                const pieceBounds = (type) => {
+                    const cells = PIECES[type].rotations[0];
+                    const rows = cells.map(([r]) => r), cols = cells.map(([, c]) => c);
+                    return {
+                        minR: Math.min(...rows), maxR: Math.max(...rows),
+                        minC: Math.min(...cols), maxC: Math.max(...cols),
+                    };
+                };
+                const renderHoldBox = () => {
+                    let pieceCells = [];
                     if (holdType) {
-                        setCell(holdVidx, 0, '1', PIECES[holdType].color);
-                        setCell(holdVidx, colTime(4), '0', null);
-                    } else {
-                        setCell(holdVidx, 0, null, null);
-                        setCell(holdVidx, colTime(4), null, null);
+                        const { minR, maxR, minC, maxC } = pieceBounds(holdType);
+                        const rowOffset = Math.floor((HOLD_SIZE - (maxR - minR + 1)) / 2) - minR;
+                        const colOffset = Math.floor((HOLD_SIZE - (maxC - minC + 1)) / 2) - minC;
+                        pieceCells = PIECES[holdType].rotations[0]
+                            .map(([pr, pc]) => [pr + rowOffset, pc + colOffset]);
+                    }
+                    for (let r = 0; r < HOLD_SIZE; r++) {
+                        for (let c = 0; c < HOLD_SIZE; c++) {
+                            const isPiece = pieceCells.some(([pr, pc]) => pr === r && pc === c);
+                            setCell(
+                                rowVidx[r], colTime(HOLD_COL_START + c),
+                                isPiece ? '1' : '0', isPiece ? PIECES[holdType].color : null
+                            );
+                        }
+                        setCell(rowVidx[r], colTime(HOLD_COL_START + HOLD_SIZE), '0', null);
                     }
                 };
+                // Where the current piece would land on a hard drop - same probe
+                // hardDrop() itself uses, just without actually moving anything.
+                const GHOST_COLOR = [170, 170, 170, 255];
+                const ghostCells = () => {
+                    if (!currentPiece) return [];
+                    let dropRow = currentPiece.row;
+                    while (canPlace({ ...currentPiece, row: dropRow + 1 })) dropRow += 1;
+                    return cellsOfPiece({ ...currentPiece, row: dropRow });
+                };
+
                 const renderAll = () => {
                     const pieceCells = currentPiece ? cellsOfPiece(currentPiece) : [];
+                    const ghost = currentPiece ? ghostCells() : [];
                     for (let r = 0; r < ROWS; r++) {
                         const filled = new Map();
                         for (let c = 0; c < COLS; c++) {
@@ -148,11 +202,13 @@ pattern_script = """
                                 filled.set(c, PIECES[currentPiece.type].color);
                             } else if (board[r][c]) {
                                 filled.set(c, board[r][c]);
+                            } else if (ghost.some(([pr, pc]) => pr === r && pc === c)) {
+                                filled.set(c, GHOST_COLOR);
                             }
                         }
                         renderRow(r, filled);
                     }
-                    renderHold();
+                    renderHoldBox();
                 };
 
                 // Scoring: standard Tetris Guideline table (level not specified by the
@@ -226,25 +282,54 @@ pattern_script = """
                         return; // game over: stop scheduling, leave the board as-is
                     }
                     renderAll();
-                    scheduleTick(fastDrop ? 200 : 1000);
+                    scheduleTick(fastDrop ? 100 : 1000);
                 };
 
-                const clearLines = () => {
-                    const remaining = board.filter((row) => row.some((cell) => !cell));
-                    const cleared = ROWS - remaining.length;
-                    for (let i = 0; i < cleared; i++) remaining.unshift(Array(COLS).fill(null));
+                const fullRows = () => {
+                    const rows = [];
+                    for (let r = 0; r < ROWS; r++) if (board[r].every((cell) => cell)) rows.push(r);
+                    return rows;
+                };
+
+                // Deletes each full row's blocks from the center columns outward, both
+                // directions at once, one column-pair per step - all cleared rows step
+                // together so a multi-line clear animates simultaneously, not row by row.
+                const animateClear = async (rows) => {
+                    const half = COLS / 2;
+                    for (let step = 0; step < half; step++) {
+                        const left = half - 1 - step, right = half + step;
+                        for (const r of rows) {
+                            board[r][left] = null;
+                            board[r][right] = null;
+                        }
+                        renderAll();
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+                };
+
+                // Drops everything above each cleared row down by one, using the row
+                // indices captured before animateClear emptied them (the rows are already
+                // blank at this point, so "is it full" can no longer be used to find them).
+                const removeRows = (rows) => {
+                    const rowSet = new Set(rows);
+                    const remaining = board.filter((_, r) => !rowSet.has(r));
+                    for (let i = 0; i < rows.length; i++) remaining.unshift(Array(COLS).fill(null));
                     for (let r = 0; r < ROWS; r++) board[r] = remaining[r];
-                    return cleared;
                 };
 
-                const lockPiece = () => {
+                const lockPiece = async () => {
                     for (const [r, c] of cellsOfPiece(currentPiece)) {
                         board[r][c] = PIECES[currentPiece.type].color;
                     }
                     const spin = detectSpin();
                     currentPiece = null;
-                    const cleared = clearLines();
-                    applyScore(cleared, spin);
+                    const rows = fullRows();
+                    if (rows.length > 0) {
+                        renderAll(); // show the completed row(s) before they start deleting
+                        await animateClear(rows);
+                        removeRows(rows);
+                    }
+                    applyScore(rows.length, spin);
                     spawnPiece();
                 };
 
@@ -299,7 +384,7 @@ pattern_script = """
                     if (!currentPiece) return;
                     if (tryMove(1, 0)) {
                         if (fastDrop) addDropScore(1, 1);
-                        scheduleTick(fastDrop ? 200 : 1000);
+                        scheduleTick(fastDrop ? 100 : 1000);
                     } else {
                         lockPiece();
                     }
