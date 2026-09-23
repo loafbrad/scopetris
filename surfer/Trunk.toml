@@ -89,15 +89,26 @@ pattern_script = """
                 const setCell = (vidx, t, value, color) => window.inject_message(JSON.stringify({
                     SetWaveCell: { vidx: vidx, time: t === 0 ? [0, []] : [1, [t]], value: value, color: color }
                 }));
-                // Border: high, low across exactly the play field's width, high again
-                // - "----______----" - on every grid row so the walls run the full
-                // height of the field.
-                const drawBorderRow = (v) => {
-                    setCell(v, 0, '1', null);
-                    setCell(v, colTime(0), '0', null);
-                    setCell(v, colTime(COLS), '1', null);
+                // The left margin (time 0, "----" before the play field itself starts) is a
+                // permanent wall that renderRow() never touches (it only ever sets
+                // colTime(0)..colTime(COLS)) - set once here, for good, before anything else
+                // (noise included) runs, rather than as part of any per-row pattern that
+                // changes by row/over time.
+                for (const v of rowVidx) setCell(v, 0, '1', null);
+
+                // Intro: every row starts as generic wave noise across its *whole* board
+                // width (matching the decorative filler look used past the wall), instead
+                // of the real wall shape - animateIntro() below reveals the actual board
+                // over it. Only ever writes breakpoints at colTime(0..COLS) - the exact same
+                // positions renderRow() itself uses - so every one gets cleanly overwritten
+                // once the real board starts rendering. An earlier version used arbitrary
+                // time offsets that didn't line up with those grid positions, leaving stray
+                // leftover breakpoints as visual garbage once the game actually started.
+                const drawNoiseRow = (v, phase) => {
+                    for (let c = 1; c < COLS; c++) setCell(v, colTime(c), String((c + phase) % 2), null);
+                    setCell(v, colTime(COLS), String((COLS + phase) % 2), null);
                 };
-                for (const v of rowVidx) drawBorderRow(v);
+                for (let r = 0; r < ROWS; r++) drawNoiseRow(rowVidx[r], r % 2);
 
                 // Fills the "wall extends forever past colTime(COLS)" region of the grid
                 // rows not used by the hold box (rows 0-4, i.e. sig_3..sig_7) with a
@@ -272,6 +283,14 @@ pattern_script = """
                         setCell(rowVidx[r], colTime(HOLD_COL_START + HOLD_SIZE), '0', null);
                     }
                 };
+                // Initialize the hold box immediately rather than waiting for the first
+                // renderAll() call (which doesn't happen until deep into the intro
+                // animation): with nothing ever written to that region yet, the render
+                // rule that extends a row's last override to the right edge stretches the
+                // wall's solid color across the whole thing until renderHoldBox() finally
+                // runs and cuts it back to empty - a jarring fill-then-empty flash on
+                // sig_3..sig_7 right as the intro's clear animation starts.
+                renderHoldBox();
                 // Where the current piece would land on a hard drop - same probe
                 // hardDrop() itself uses, just without actually moving anything.
                 const GHOST_COLOR = [170, 170, 170, 255];
@@ -518,8 +537,39 @@ pattern_script = """
                     }
                 }
 
-                renderScore();
-                spawnPiece();
+                // Intro: reveal the real board over the noise top-to-bottom, fill the
+                // interior solid center-outward (the reverse of a line clear), then clear
+                // it center-outward with the same animation a real line clear uses, before
+                // the game actually starts. currentPiece stays null throughout, so every
+                // key handler's own "if (!currentPiece) return" guard already ignores input
+                // during this - no separate input-lock needed.
+                const animateIntro = async () => {
+                    await new Promise((resolve) => setTimeout(resolve, 300)); // sit on the noise briefly first
+
+                    // Curtain: the exact same bold, solid-color, one-row-per-step sweep as
+                    // animateGameOver()'s fill, just top-to-bottom instead of bottom-to-top.
+                    // Writes directly into `board` (rendered via the normal renderAll(), same
+                    // as real gameplay) rather than a throwaway Map, so the clear-from-center
+                    // step right after can wipe this exact fill away directly - no separate
+                    // "reveal empty, then rebuild solid again" round trip needed first.
+                    const INTRO_CURTAIN_COLOR = [220, 220, 220, 255];
+                    const curtainFilled = new Map(Array.from({ length: COLS }, (_, c) => [c, INTRO_CURTAIN_COLOR]));
+                    for (let r = 0; r < ROWS; r++) {
+                        board[r] = Array(COLS).fill(INTRO_CURTAIN_COLOR); // keeps `board` in sync for animateClear() below
+                        // Draws just this one row directly (not renderAll(), which redraws
+                        // every row from `board` on every call - rows not yet reached are
+                        // still null there, so a renderAll() here would instantly blank out
+                        // their noise instead of leaving it for the sweep to reach).
+                        renderRow(r, curtainFilled);
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+
+                    // Clear from the center outward, same animation as a real line clear.
+                    await animateClear(Array.from({ length: ROWS }, (_, i) => i));
+                    renderScore();
+                    spawnPiece();
+                };
+                animateIntro();
 
                 const gameKeys = ['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'KeyZ', 'KeyX', 'Shift'];
                 window.addEventListener('keydown', (e) => {
