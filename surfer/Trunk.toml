@@ -306,6 +306,19 @@ pattern_script = """
                 let score = 0, level = 1, totalLines = 0, combo = -1, lastWasDifficult = false;
                 let lastActionWasRotate = false;
                 const renderScore = () => setCell(counterVidx, 0, String(score), [0, 255, 255, 255]);
+
+                // Classic Tetris gravity table: ms per row at each level (frames-at-60fps
+                // converted to ms). Index 0 = level 1 (48 frames/row, the traditional
+                // "level 0" row - shifted by one since level here starts at 1, matching the
+                // +1-per-10-lines convention above), decreasing to 1 frame/row by level 30;
+                // levels beyond the table clamp to that fastest value. Soft drop (fastDrop)
+                // stays a fixed 100ms regardless of level, same as before.
+                const DROP_DELAY_MS = [
+                    800, 717, 633, 550, 467, 383, 300, 217, 133, 100,
+                    83, 83, 83, 67, 67, 67, 50, 50, 50, 33,
+                    33, 33, 33, 33, 33, 33, 33, 33, 33, 17,
+                ];
+                const dropDelay = () => DROP_DELAY_MS[Math.min(level - 1, DROP_DELAY_MS.length - 1)];
                 const isDifficult = (cleared, spin) => cleared === 4 || spin !== 'none';
                 const basePoints = (cleared, spin, isB2B) => ({
                     '0-mini': 100, '0-regular': 400,
@@ -397,7 +410,7 @@ pattern_script = """
                         return; // game over: stop scheduling, board fills with 'x' instead
                     }
                     renderAll();
-                    scheduleTick(fastDrop ? 100 : 1000);
+                    scheduleTick(fastDrop ? 100 : dropDelay());
                 };
 
                 const fullRows = () => {
@@ -499,7 +512,7 @@ pattern_script = """
                     if (!currentPiece) return;
                     if (tryMove(1, 0)) {
                         if (fastDrop) addDropScore(1, 1);
-                        scheduleTick(fastDrop ? 100 : 1000);
+                        scheduleTick(fastDrop ? 100 : dropDelay());
                     } else {
                         lockPiece();
                     }
@@ -522,14 +535,29 @@ pattern_script = """
                     else if (e.key === 'Shift') holdPiece();
                     else if (e.key === 'ArrowDown' && !fastDrop) {
                         fastDrop = true;
-                        if (timeoutId !== null) scheduleTick(200); // snappier than waiting for the next natural tick
+                        // Real Tetris soft drop is immediately responsive: the piece steps
+                        // down (or locks, if it's already resting) the moment the key is
+                        // pressed, not after whatever was left of the previous, slower
+                        // gravity interval. tick() does exactly that move-or-lock step and
+                        // reschedules itself at the new fastDrop-aware delay, so calling it
+                        // directly here (instead of just rescheduling the pending timer)
+                        // removes the wait entirely rather than just shortening it.
+                        tick();
                     }
                 }, { capture: true });
                 window.addEventListener('keyup', (e) => {
                     if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    if (e.key === 'ArrowDown') fastDrop = false;
+                    if (e.key === 'ArrowDown' && fastDrop) {
+                        fastDrop = false;
+                        // Without this, the timer already pending from the last fast tick
+                        // still fires once more at the fast interval before the next tick
+                        // naturally reschedules at the slow rate - an extra fast-feeling row
+                        // right after release, which reads as sluggish/unresponsive.
+                        // Rescheduling immediately at the slow delay removes that extra step.
+                        if (timeoutId !== null) scheduleTick(dropDelay());
+                    }
                 }, { capture: true });
             })();
         }
