@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+<!-- Disable zooming: -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+
+<head>
+    <!-- If no waveform is requested via the URL, the Rust startup code (see
+         vcd_from_url in libsurfer/src/wasm_api.rs) falls back to loading the
+         built-in blank demo project itself, so first-time visitors see a
+         populated wave view without load_url/startup_commands ever appearing
+         in the address bar. -->
+
+    <!-- change this to your project name -->
+    <title>Surfer</title>
+
+    <!-- config for our rust wasm binary. go to https://trunkrs.dev/assets/#rust for more customization -->
+        <script type="module">
+        import init from './surfer.js';
+        await init({module_or_path: './surfer_bg.wasm'});
+        import {WebHandle, inject_message, id_of_name, draw_text_arrow, index_of_name} from './surfer.js';
+        window.inject_message = inject_message;
+        window.id_of_name = id_of_name;
+        window.draw_text_arrow = draw_text_arrow;
+        window.index_of_name = index_of_name;
+        // No load_url in the visible URL at all means Rust's own startup fallback
+        // (see vcd_from_url in libsurfer/src/wasm_api.rs) is loading blank_demo.vcd
+        // by default, so the hack below still applies; an explicit load_url that
+        // points elsewhere means a different file is being viewed, so skip it.
+        const requestedLoadUrl = new URLSearchParams(location.search).get('load_url');
+        if (!requestedLoadUrl || requestedLoadUrl.includes('blank_demo.vcd')) {
+            (async () => {
+                const resolve = async (name) => {
+                    let idx = null;
+                    // index_of_name resolves Option::None to JS `undefined`, not `null` -
+                    // use == to catch both, or a stray `undefined` vidx silently breaks
+                    // every SetWaveCell call below (JSON.stringify drops undefined fields).
+                    while (idx == null) {
+                        idx = await window.index_of_name(name);
+                        if (idx == null) await new Promise(r => setTimeout(r, 200));
+                    }
+                    return idx;
+                };
+                const counterVidx = await resolve('scopetris_top.Score');
+
+                // 10x20 Tetris grid: one row (scopetris_top.sig_3..sig_22) per grid
+                // row, one CELL-wide time slot per grid column. MARGIN_COLS shifts
+                // every grid column right by a few segments so the border row (see
+                // below) has room to show a leading high segment before the field.
+                const ROWS = 20, COLS = 10, CELL = 20, MARGIN_COLS = 3;
+                const colTime = (c) => (MARGIN_COLS + c) * CELL;
+
+                // Debug: log the rendered canvas size and effective on-screen width of one
+                // grid cell, to compare "does this look the same size" across machines/
+                // window sizes. blank_demo.vcd's last timestamp is #3000 (3x the original
+                // #1000, for more zoom-out headroom - see the ZoomToRange fix below), so on
+                // the default zoom-to-fit viewport (curr_left=0, curr_right=1 relative to
+                // that full range - true on a fresh page load before any zoom/pan, i.e.
+                // before that fix's ZoomToRange message has been processed yet) one
+                // CELL-wide grid column covers CELL/3000 of the canvas's rendered width.
+                const TOTAL_TIME = 3000;
+                (() => {
+                    const rect = document.getElementById('the_canvas_id').getBoundingClientRect();
+                    const cellPx = rect.width * (CELL / TOTAL_TIME);
+                    console.log(
+                        '[scopetris] canvas %s x %s CSS px, devicePixelRatio %s, window %s x %s ' +
+                        '-> 1 grid cell ≈ %s px wide (assumes default zoom-to-fit)',
+                        rect.width.toFixed(1), rect.height.toFixed(1), window.devicePixelRatio,
+                        window.innerWidth, window.innerHeight, cellPx.toFixed(2)
+                    );
+                })();
+
+                // Fix the *initial* zoom to a device-independent absolute scale, instead of
+                // the default zoom-to-fit (which shows the VCD's full 0..1000 range
+                // regardless of canvas width, making the board bigger on wider screens and
+                // smaller on narrower ones - confirmed via the debug log above: 28.80px/cell
+                // on a 1440px-wide canvas vs 51.20px/cell on a 2560px-wide one).
+                // preserve_zoom_on_resize (Rust-side, default_config.toml) keeps it steady
+                // across later resizes; this fixes where it starts, using the same 1.44
+                // px-per-time-unit reference (1440px canvas / 1000 total time units) that
+                // looked right during development. Runs after the file has loaded (the
+                // counterVidx resolve above only succeeds once it has), since ZoomToRange is
+                // a no-op if the waveform's timestamps aren't known yet.
+                const REFERENCE_PX_PER_TIME_UNIT = 1.44;
+                {
+                    const canvasWidth = document
+                        .getElementById('the_canvas_id')
+                        .getBoundingClientRect().width;
+                    const visibleTimeUnits = Math.max(
+                        1, Math.round(canvasWidth / REFERENCE_PX_PER_TIME_UNIT)
+                    );
+                    window.inject_message(JSON.stringify({
+                        ZoomToRange: { start: [0, []], end: [1, [visibleTimeUnits]], viewport_idx: 0 },
+                    }));
+                }
+
+                const rowVidx = await Promise.all(
+                    Array.from({ length: ROWS }, (_, i) => resolve('scopetris_top.sig_' + (i + 3)))
+                );
+                // sig_23 used to be an extra "floor cap" row drawn with this same wall
+                // pattern; it's now a real 8-bit random-changing vector (VCD data, like
+                // playfield_top) instead, so it's untouched by the override API here.
+
+                const setCell = (vidx, t, value, color) => window.inject_message(JSON.stringify({
+                    SetWaveCell: { vidx: vidx, time: t === 0 ? [0, []] : [1, [t]], value: value, color: color }
+                }));
+                // The left margin (time 0, "----" before the play field itself starts) is a
+                // permanent wall that renderRow() never touches (it only ever sets
+                // colTime(0)..colTime(COLS)) - set once here, for good, before anything else
+                // (noise included) runs, rather than as part of any per-row pattern that
+                // changes by row/over time.
+                for (const v of rowVidx) setCell(v, 0, '1', null);
+
+                // Intro: every row starts as generic wave noise across its *whole* board
+                // width (matching the decorative filler look used past the wall), instead
+                // of the real wall shape - animateIntro() below reveals the actual board
+                // over it. Only ever writes breakpoints at colTime(0..COLS) - the exact same
+                // positions renderRow() itself uses - so every one gets cleanly overwritten
+                // once the real board starts rendering. An earlier version used arbitrary
+                // time offsets that didn't line up with those grid positions, leaving stray
+                // leftover breakpoints as visual garbage once the game actually started.
+                const drawNoiseRow = (v, phase) => {
+                    for (let c = 1; c < COLS; c++) setCell(v, colTime(c), String((c + phase) % 2), null);
+                    setCell(v, colTime(COLS), String((COLS + phase) % 2), null);
+                };
+                for (let r = 0; r < ROWS; r++) drawNoiseRow(rowVidx[r], r % 2);
+
+                // Fills the "wall extends forever past colTime(COLS)" region of the grid
+                // rows not used by the hold box (rows 0-4, i.e. sig_3..sig_7) with a
+                // staggered 0/1 toggle pattern, so sig_8..sig_22 read as ordinary busy
+                // waveforms out past the board instead of one flat unbroken green bar.
+                // Purely decorative and drawn once here: renderRow() never touches
+                // anything past colTime(COLS), so nothing overwrites this later.
+                // Mostly-flat with occasional short blips (1-2 CELL-widths high, then back
+                // to low) spread far apart, rather than continuously toggling - default
+                // color, same as the rest of the board.
+                const drawFillerBlips = (v, spacing, phase, blipCells) => {
+                    // +1, not exactly colTime(COLS): renderRow() unconditionally resets that
+                    // exact point back to '1' (the wall boundary) on every single frame, so a
+                    // breakpoint placed exactly there keeps getting stomped back to logic 1
+                    // right after this runs. One time-unit past it is outside renderRow()'s
+                    // reach and survives.
+                    setCell(v, colTime(COLS) + 1, '0', null);
+                    for (let t = colTime(COLS) + phase; t <= TOTAL_TIME; t += spacing) {
+                        setCell(v, t, '1', null);
+                        const end = t + blipCells * CELL;
+                        if (end <= TOTAL_TIME) setCell(v, end, '0', null);
+                    }
+                };
+                // sig_14 stays continuously toggling instead of sparse blips, for variety.
+                const drawFillerToggle = (v, period) => {
+                    setCell(v, colTime(COLS) + 1, '0', null); // see drawFillerBlips comment above
+                    for (let step = 0; ; step++) {
+                        const t = colTime(COLS) + 1 + step * period;
+                        if (t > TOTAL_TIME) break;
+                        setCell(v, t, String(step % 2), null);
+                    }
+                };
+                // sig_12, sig_19, sig_20 left fully flat (logic 0, no blips at all), for
+                // contrast against the busier rows around them.
+                const FLAT_FILLER_ROWS = new Set([9, 16, 17]);
+                const CONTINUOUS_FILLER_ROWS = new Set([11]); // sig_14
+                for (let r = 5; r < ROWS; r++) {
+                    if (FLAT_FILLER_ROWS.has(r)) {
+                        setCell(rowVidx[r], colTime(COLS) + 1, '0', null);
+                    } else if (CONTINUOUS_FILLER_ROWS.has(r)) {
+                        drawFillerToggle(rowVidx[r], 40);
+                    } else {
+                        drawFillerBlips(rowVidx[r], 400 + (r % 6) * 100, (r * 73) % 400, (r % 2) + 1);
+                    }
+                }
+
+                // Controls legend: two rows, added last (names sort after sig_24, see
+                // z_controls_1/2 in the VCD) so they land right below the board. Left
+                // adjusted at time 0 - no gap. They're >1 bit wide so SetWaveCell renders
+                // them as text boxes rather than boolean level lines.
+                const [controls1Vidx, controls2Vidx] = await Promise.all(
+                    ['scopetris_top.z_controls_1', 'scopetris_top.z_controls_2'].map(resolve)
+                );
+                const CONTROLS_TEXT_1 = 'Left/Right: Move   |   Down: Soft Drop   |   Up: Hard Drop';
+                const CONTROLS_TEXT_2 = 'Z: Rotate Left   |   X: Rotate Right   |   Shift: Hold';
+                const renderControls = (color) => {
+                    setCell(controls1Vidx, 0, CONTROLS_TEXT_1, color);
+                    setCell(controls2Vidx, 0, CONTROLS_TEXT_2, color);
+                };
+                renderControls(null);
+
+                // Controls hint: blink the legend bright/dark at 1Hz (500ms per phase) to
+                // point the user at the keyboard controls, in two situations:
+                // - Clicking the waveform canvas (the Rust side calls
+                //   window.surfer_wave_canvas_clicked() on any click/drag start there - see
+                //   notify_wave_canvas_clicked in libsurfer/src/wasm_api.rs) suggests the
+                //   user hasn't realized the game is keyboard-driven: CLICK_BLINKS cycles.
+                //   A click mid-blink restarts the count.
+                // - IDLE_HINT_MS with no key pressed: IDLE_BLINKS cycles. The idle timer
+                //   re-arms on every keydown and after each blink finishes, so a user who
+                //   stays idle gets reminded again - at most IDLE_HINT_MAX times in total.
+                // Both only apply during the first CONTROLS_HINT_PIECES pieces; once that
+                // many have locked, any running blink stops early and the hint is off
+                // for good (stopControlsHints).
+                const CONTROLS_HINT_PIECES = 3, CLICK_BLINKS = 3;
+                const IDLE_BLINKS = 5, IDLE_HINT_MS = 5000, IDLE_HINT_MAX = 2;
+                const CONTROLS_BRIGHT = [255, 255, 0, 255], CONTROLS_DARK = [70, 70, 70, 255];
+                let piecesLocked = 0;
+                let hintsActive = false; // set once the first piece spawns, after the intro
+                let controlsBlinkId = null;
+                let idleTimerId = null;
+                let idleHintsFired = 0;
+                const stopControlsBlink = () => {
+                    if (controlsBlinkId === null) return;
+                    clearInterval(controlsBlinkId);
+                    controlsBlinkId = null;
+                    renderControls(null);
+                };
+                // (Re)starts the idle countdown. Skipped while a blink is running - the
+                // blink re-arms it itself when it finishes.
+                const armIdleHint = () => {
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    if (!hintsActive || controlsBlinkId !== null || idleHintsFired >= IDLE_HINT_MAX) return;
+                    idleTimerId = setTimeout(() => {
+                        idleHintsFired += 1;
+                        startControlsBlink(IDLE_BLINKS);
+                    }, IDLE_HINT_MS);
+                };
+                const startControlsBlink = (cycles) => {
+                    stopControlsBlink();
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    let phase = 0; // even = bright, odd = dark
+                    renderControls(CONTROLS_BRIGHT);
+                    controlsBlinkId = setInterval(() => {
+                        phase += 1;
+                        if (phase < cycles * 2) {
+                            renderControls(phase % 2 === 0 ? CONTROLS_BRIGHT : CONTROLS_DARK);
+                            return;
+                        }
+                        stopControlsBlink();
+                        armIdleHint();
+                    }, 500);
+                };
+                const stopControlsHints = () => {
+                    hintsActive = false;
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    stopControlsBlink();
+                };
+                window.surfer_wave_canvas_clicked = () => {
+                    if (piecesLocked >= CONTROLS_HINT_PIECES) return;
+                    startControlsBlink(CLICK_BLINKS);
+                };
+
+                // Each piece: color plus 4 rotation states, each a list of [row,col]
+                // cell offsets within a 4x4 box. Standard SRS-like flat/spawn shapes.
+                const PIECES = {
+                    I: { color: [0, 255, 255, 255], rotations: [
+                        [[1, 0], [1, 1], [1, 2], [1, 3]],
+                        [[0, 2], [1, 2], [2, 2], [3, 2]],
+                        [[2, 0], [2, 1], [2, 2], [2, 3]],
+                        [[0, 1], [1, 1], [2, 1], [3, 1]],
+                    ] },
+                    O: { color: [255, 255, 0, 255], rotations: [
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                        [[1, 1], [1, 2], [2, 1], [2, 2]],
+                    ] },
+                    T: { color: [200, 90, 255, 255], rotations: [
+                        [[0, 1], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [1, 1], [1, 2], [2, 1]],
+                        [[1, 0], [1, 1], [1, 2], [2, 1]],
+                        [[0, 1], [1, 0], [1, 1], [2, 1]],
+                    ] },
+                    S: { color: [0, 255, 0, 255], rotations: [
+                        [[0, 1], [0, 2], [1, 0], [1, 1]],
+                        [[0, 1], [1, 1], [1, 2], [2, 2]],
+                        [[1, 1], [1, 2], [2, 0], [2, 1]],
+                        [[0, 0], [1, 0], [1, 1], [2, 1]],
+                    ] },
+                    Z: { color: [255, 0, 0, 255], rotations: [
+                        [[0, 0], [0, 1], [1, 1], [1, 2]],
+                        [[0, 2], [1, 1], [1, 2], [2, 1]],
+                        [[1, 0], [1, 1], [2, 1], [2, 2]],
+                        [[0, 1], [1, 0], [1, 1], [2, 0]],
+                    ] },
+                    J: { color: [60, 140, 255, 255], rotations: [
+                        [[0, 0], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [0, 2], [1, 1], [2, 1]],
+                        [[1, 0], [1, 1], [1, 2], [2, 2]],
+                        [[0, 1], [1, 1], [2, 0], [2, 1]],
+                    ] },
+                    L: { color: [255, 165, 0, 255], rotations: [
+                        [[0, 2], [1, 0], [1, 1], [1, 2]],
+                        [[0, 1], [1, 1], [2, 1], [2, 2]],
+                        [[1, 0], [1, 1], [1, 2], [2, 0]],
+                        [[0, 0], [0, 1], [1, 1], [2, 1]],
+                    ] },
+                };
+                const TYPES = Object.keys(PIECES);
+                const SPAWN_ROW = 0, SPAWN_COL = 3;
+
+                const board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+                let currentPiece = null;
+                let holdType = null;
+                let canHold = true;
+                let bag = [];
+
+                const shuffle = (arr) => {
+                    for (let i = arr.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [arr[i], arr[j]] = [arr[j], arr[i]];
+                    }
+                    return arr;
+                };
+
+                const cellsOfPiece = (p) => PIECES[p.type].rotations[p.rotation]
+                    .map(([dr, dc]) => [p.row + dr, p.col + dc]);
+                const canPlace = (p) => cellsOfPiece(p).every(([r, c]) =>
+                    c >= 0 && c < COLS && r >= 0 && r < ROWS && !board[r][c]);
+
+                const renderRow = (r, filled) => {
+                    for (let c = 1; c < COLS; c++) setCell(rowVidx[r], colTime(c), null, null);
+                    for (const [col, color] of filled) {
+                        if (col > 0) setCell(rowVidx[r], colTime(col), '1', color);
+                        if (col < COLS - 1) setCell(rowVidx[r], colTime(col + 1), '0', null);
+                    }
+                    // Explicit boundary endpoints, written last so a filled edge column
+                    // (0 or COLS-1) can't leave the border's own wall keys wrong.
+                    setCell(rowVidx[r], colTime(0), filled.has(0) ? '1' : '0', filled.get(0) ?? null);
+                    setCell(rowVidx[r], colTime(COLS), '1', null);
+                };
+                // Hold-piece box: reuses the top 5 grid rows (rowVidx[0..4], the same
+                // signals as the playfield's own top rows) drawn further right in time,
+                // past the board's right wall - genuinely the same rows as the board,
+                // just offset horizontally, rather than a separate block of rows above
+                // or below it. Centers each piece by its *actual* occupied cells (not
+                // the nominal 4x4 rotation grid, which would put e.g. the 1x4 I piece
+                // off-center) - a fixed offset only centers pieces that happen to fill
+                // their whole 4x4 box, which none of these shapes do. No border: at 5x5
+                // a full ring would leave just 3 columns of interior, too narrow for the
+                // I piece to even fit, let alone center.
+                const HOLD_COL_START = COLS + 2, HOLD_SIZE = 5;
+                const pieceBounds = (type) => {
+                    const cells = PIECES[type].rotations[0];
+                    const rows = cells.map(([r]) => r), cols = cells.map(([, c]) => c);
+                    return {
+                        minR: Math.min(...rows), maxR: Math.max(...rows),
+                        minC: Math.min(...cols), maxC: Math.max(...cols),
+                    };
+                };
+                const renderHoldBox = () => {
+                    let pieceCells = [];
+                    if (holdType) {
+                        const { minR, maxR, minC, maxC } = pieceBounds(holdType);
+                        const rowOffset = Math.floor((HOLD_SIZE - (maxR - minR + 1)) / 2) - minR;
+                        const colOffset = Math.floor((HOLD_SIZE - (maxC - minC + 1)) / 2) - minC;
+                        pieceCells = PIECES[holdType].rotations[0]
+                            .map(([pr, pc]) => [pr + rowOffset, pc + colOffset]);
+                    }
+                    for (let r = 0; r < HOLD_SIZE; r++) {
+                        for (let c = 0; c < HOLD_SIZE; c++) {
+                            const isPiece = pieceCells.some(([pr, pc]) => pr === r && pc === c);
+                            setCell(
+                                rowVidx[r], colTime(HOLD_COL_START + c),
+                                isPiece ? '1' : '0', isPiece ? PIECES[holdType].color : null
+                            );
+                        }
+                        setCell(rowVidx[r], colTime(HOLD_COL_START + HOLD_SIZE), '0', null);
+                    }
+                };
+                // Initialize the hold box immediately rather than waiting for the first
+                // renderAll() call (which doesn't happen until deep into the intro
+                // animation): with nothing ever written to that region yet, the render
+                // rule that extends a row's last override to the right edge stretches the
+                // wall's solid color across the whole thing until renderHoldBox() finally
+                // runs and cuts it back to empty - a jarring fill-then-empty flash on
+                // sig_3..sig_7 right as the intro's clear animation starts.
+                renderHoldBox();
+                // Where the current piece would land on a hard drop - same probe
+                // hardDrop() itself uses, just without actually moving anything.
+                const GHOST_COLOR = [170, 170, 170, 255];
+                const ghostCells = () => {
+                    if (!currentPiece) return [];
+                    let dropRow = currentPiece.row;
+                    while (canPlace({ ...currentPiece, row: dropRow + 1 })) dropRow += 1;
+                    return cellsOfPiece({ ...currentPiece, row: dropRow });
+                };
+
+                const renderAll = () => {
+                    const pieceCells = currentPiece ? cellsOfPiece(currentPiece) : [];
+                    const ghost = currentPiece ? ghostCells() : [];
+                    for (let r = 0; r < ROWS; r++) {
+                        const filled = new Map();
+                        for (let c = 0; c < COLS; c++) {
+                            if (pieceCells.some(([pr, pc]) => pr === r && pc === c)) {
+                                filled.set(c, PIECES[currentPiece.type].color);
+                            } else if (board[r][c]) {
+                                filled.set(c, board[r][c]);
+                            } else if (ghost.some(([pr, pc]) => pr === r && pc === c)) {
+                                filled.set(c, GHOST_COLOR);
+                            }
+                        }
+                        renderRow(r, filled);
+                    }
+                    renderHoldBox();
+                };
+
+                // Scoring: standard Tetris Guideline table (level not specified by the
+                // table itself - using the common convention: +1 level per 10 lines).
+                let score = 0, level = 1, totalLines = 0, combo = -1, lastWasDifficult = false;
+                let lastActionWasRotate = false;
+                const renderScore = () => setCell(counterVidx, 0, String(score), [0, 255, 255, 255]);
+
+                // Classic Tetris gravity table: ms per row at each level (frames-at-60fps
+                // converted to ms). Index 0 = level 1 (48 frames/row, the traditional
+                // "level 0" row - shifted by one since level here starts at 1, matching the
+                // +1-per-10-lines convention above), decreasing to 1 frame/row by level 30;
+                // levels beyond the table clamp to that fastest value. Soft drop (fastDrop)
+                // stays a fixed 100ms regardless of level, same as before.
+                const DROP_DELAY_MS = [
+                    800, 717, 633, 550, 467, 383, 300, 217, 133, 100,
+                    83, 83, 83, 67, 67, 67, 50, 50, 50, 33,
+                    33, 33, 33, 33, 33, 33, 33, 33, 33, 17,
+                ];
+                const dropDelay = () => DROP_DELAY_MS[Math.min(level - 1, DROP_DELAY_MS.length - 1)];
+                const isDifficult = (cleared, spin) => cleared === 4 || spin !== 'none';
+                const basePoints = (cleared, spin, isB2B) => ({
+                    '0-mini': 100, '0-regular': 400,
+                    '1-none': 100, '1-mini': 200, '1-regular': isB2B ? 1200 : 800,
+                    '2-none': 300, '2-mini': isB2B ? 600 : 400, '2-regular': isB2B ? 1800 : 1200,
+                    '3-none': 500, '3-regular': isB2B ? 2400 : 1600,
+                    '4-none': isB2B ? 1200 : 800,
+                }[cleared + '-' + spin] ?? 0);
+                const applyScore = (cleared, spin) => {
+                    const difficult = isDifficult(cleared, spin);
+                    const isB2B = difficult && lastWasDifficult;
+                    const points = basePoints(cleared, spin, isB2B);
+
+                    combo = cleared > 0 ? combo + 1 : -1;
+                    const comboBonus = cleared > 0 && combo > 0 ? 50 * combo * level : 0;
+
+                    if (cleared > 0 || spin !== 'none') lastWasDifficult = difficult;
+
+                    const gained = points * level + comboBonus;
+                    if (gained > 0) { score += gained; renderScore(); }
+
+                    if (cleared > 0) {
+                        totalLines += cleared;
+                        level = Math.floor(totalLines / 10) + 1;
+                    }
+                };
+                const addDropScore = (rows, perRow) => {
+                    if (rows <= 0) return;
+                    score += rows * perRow * level;
+                    renderScore();
+                };
+                // Simplified 3-corner-rule T-spin detection (not full SRS kick-table
+                // rules): only counts if a T-piece's last successful action was a
+                // rotation (not a slide) and >=3 of its 4 diagonal corners are occupied
+                // at lock time. Both "front" corners (facing the point) occupied =>
+                // regular T-spin; only one front corner (both back corners occupied)
+                // => mini.
+                const detectSpin = () => {
+                    if (currentPiece.type !== 'T' || !lastActionWasRotate) return 'none';
+                    const cr = currentPiece.row + 1, cc = currentPiece.col + 1; // T's center cell in all 4 rotations
+                    const occupied = (r, c) => r < 0 || r >= ROWS || c < 0 || c >= COLS || !!(board[r] && board[r][c]);
+                    const tl = occupied(cr - 1, cc - 1), tr = occupied(cr - 1, cc + 1);
+                    const bl = occupied(cr + 1, cc - 1), br = occupied(cr + 1, cc + 1);
+                    if ([tl, tr, bl, br].filter(Boolean).length < 3) return 'none';
+                    const front = { 0: [tl, tr], 1: [tr, br], 2: [bl, br], 3: [tl, bl] }[currentPiece.rotation];
+                    return front[0] && front[1] ? 'regular' : 'mini';
+                };
+
+                let fastDrop = false;
+                let timeoutId = null;
+                const scheduleTick = (delay) => {
+                    if (timeoutId !== null) clearTimeout(timeoutId);
+                    timeoutId = setTimeout(tick, delay);
+                };
+
+                // Game over: fills every playfield column of a row with 'x' (undefined) -
+                // Surfer's built-in invalid-signal rendering, the same one that shows up
+                // if a row has no override yet - one row per 100ms step, bottom row first
+                // and climbing upward, leaving the border wall/hold box/controls legend
+                // (everything past colTime(COLS)) untouched.
+                const fillRowInvalid = (r) => {
+                    // One 'x' breakpoint per column, explicitly red: a single breakpoint at
+                    // time 0 only covers up to whatever the row's *next* pre-existing
+                    // breakpoint happens to be (the old per-column values from the last
+                    // real board render are still sitting there otherwise), leaving most of
+                    // the row showing stale board content instead of filling it.
+                    for (let c = 0; c < COLS; c++) setCell(rowVidx[r], colTime(c), 'x', [255, 0, 0, 255]);
+                };
+                const animateGameOver = async () => {
+                    for (let r = ROWS - 1; r >= 0; r--) {
+                        fillRowInvalid(r);
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+                };
+
+                const spawnPiece = (type) => {
+                    currentPiece = { type: type ?? bag.shift() ?? (bag = shuffle([...TYPES])).shift(), rotation: 0, row: SPAWN_ROW, col: SPAWN_COL };
+                    if (bag.length === 0) bag = shuffle([...TYPES]);
+                    canHold = true;
+                    lastActionWasRotate = false;
+                    if (!canPlace(currentPiece)) {
+                        timeoutId = null;
+                        renderAll(); // show the piece stuck at spawn for a moment first
+                        // Null it out so tryMove/tryRotate/hardDrop/holdPiece's own
+                        // "if (!currentPiece) return" guards ignore input during the fill
+                        // animation, instead of re-rendering (and undoing) it mid-flight.
+                        currentPiece = null;
+                        animateGameOver();
+                        return; // game over: stop scheduling, board fills with 'x' instead
+                    }
+                    renderAll();
+                    scheduleTick(fastDrop ? 100 : dropDelay());
+                };
+
+                const fullRows = () => {
+                    const rows = [];
+                    for (let r = 0; r < ROWS; r++) if (board[r].every((cell) => cell)) rows.push(r);
+                    return rows;
+                };
+
+                // Deletes each full row's blocks from the center columns outward, both
+                // directions at once, one column-pair per step - all cleared rows step
+                // together so a multi-line clear animates simultaneously, not row by row.
+                const animateClear = async (rows) => {
+                    const half = COLS / 2;
+                    for (let step = 0; step < half; step++) {
+                        const left = half - 1 - step, right = half + step;
+                        for (const r of rows) {
+                            board[r][left] = null;
+                            board[r][right] = null;
+                        }
+                        renderAll();
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+                };
+
+                // Drops everything above each cleared row down by one, using the row
+                // indices captured before animateClear emptied them (the rows are already
+                // blank at this point, so "is it full" can no longer be used to find them).
+                const removeRows = (rows) => {
+                    const rowSet = new Set(rows);
+                    const remaining = board.filter((_, r) => !rowSet.has(r));
+                    for (let i = 0; i < rows.length; i++) remaining.unshift(Array(COLS).fill(null));
+                    for (let r = 0; r < ROWS; r++) board[r] = remaining[r];
+                };
+
+                const lockPiece = async () => {
+                    for (const [r, c] of cellsOfPiece(currentPiece)) {
+                        board[r][c] = PIECES[currentPiece.type].color;
+                    }
+                    const spin = detectSpin();
+                    currentPiece = null;
+                    if (++piecesLocked >= CONTROLS_HINT_PIECES) stopControlsHints();
+                    const rows = fullRows();
+                    if (rows.length > 0) {
+                        renderAll(); // show the completed row(s) before they start deleting
+                        await animateClear(rows);
+                        removeRows(rows);
+                    }
+                    applyScore(rows.length, spin);
+                    spawnPiece();
+                };
+
+                const tryMove = (dRow, dCol) => {
+                    const moved = { ...currentPiece, row: currentPiece.row + dRow, col: currentPiece.col + dCol };
+                    if (!canPlace(moved)) return false;
+                    currentPiece = moved;
+                    lastActionWasRotate = false;
+                    renderAll();
+                    return true;
+                };
+
+                const tryRotate = (dir) => {
+                    const rotation = (currentPiece.rotation + dir + 4) % 4;
+                    for (const [dRow, dCol] of [[0, 0], [0, -1], [0, 1], [-1, 0]]) {
+                        const rotated = { ...currentPiece, rotation, row: currentPiece.row + dRow, col: currentPiece.col + dCol };
+                        if (canPlace(rotated)) {
+                            currentPiece = rotated;
+                            lastActionWasRotate = true;
+                            renderAll();
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const hardDrop = () => {
+                    if (!currentPiece) return;
+                    let rows = 0;
+                    while (canPlace({ ...currentPiece, row: currentPiece.row + 1 })) { currentPiece.row += 1; rows += 1; }
+                    addDropScore(rows, 2);
+                    renderAll();
+                    lockPiece();
+                };
+
+                const holdPiece = () => {
+                    if (!currentPiece || !canHold) return;
+                    const current = currentPiece.type;
+                    if (holdType === null) {
+                        holdType = current;
+                        spawnPiece();
+                    } else {
+                        const swapped = holdType;
+                        holdType = current;
+                        spawnPiece(swapped);
+                    }
+                    canHold = false;
+                    renderAll();
+                };
+
+                function tick() {
+                    if (!currentPiece) return;
+                    if (tryMove(1, 0)) {
+                        if (fastDrop) addDropScore(1, 1);
+                        scheduleTick(fastDrop ? 100 : dropDelay());
+                    } else {
+                        lockPiece();
+                    }
+                }
+
+                // Intro: reveal the real board over the noise top-to-bottom, fill the
+                // interior solid center-outward (the reverse of a line clear), then clear
+                // it center-outward with the same animation a real line clear uses, before
+                // the game actually starts. currentPiece stays null throughout, so every
+                // key handler's own "if (!currentPiece) return" guard already ignores input
+                // during this - no separate input-lock needed.
+                const animateIntro = async () => {
+                    await new Promise((resolve) => setTimeout(resolve, 300)); // sit on the noise briefly first
+
+                    // Curtain: the exact same bold, solid-color, one-row-per-step sweep as
+                    // animateGameOver()'s fill, just top-to-bottom instead of bottom-to-top.
+                    // Writes directly into `board` (rendered via the normal renderAll(), same
+                    // as real gameplay) rather than a throwaway Map, so the clear-from-center
+                    // step right after can wipe this exact fill away directly - no separate
+                    // "reveal empty, then rebuild solid again" round trip needed first.
+                    const INTRO_CURTAIN_COLOR = [220, 220, 220, 255];
+                    const curtainFilled = new Map(Array.from({ length: COLS }, (_, c) => [c, INTRO_CURTAIN_COLOR]));
+                    for (let r = 0; r < ROWS; r++) {
+                        board[r] = Array(COLS).fill(INTRO_CURTAIN_COLOR); // keeps `board` in sync for animateClear() below
+                        // Draws just this one row directly (not renderAll(), which redraws
+                        // every row from `board` on every call - rows not yet reached are
+                        // still null there, so a renderAll() here would instantly blank out
+                        // their noise instead of leaving it for the sweep to reach).
+                        renderRow(r, curtainFilled);
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                    }
+
+                    // Clear from the center outward, same animation as a real line clear.
+                    await animateClear(Array.from({ length: ROWS }, (_, i) => i));
+                    renderScore();
+                    spawnPiece();
+                    hintsActive = true;
+                    armIdleHint();
+                };
+                animateIntro();
+
+                const gameKeys = ['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'KeyZ', 'KeyX', 'Shift'];
+                window.addEventListener('keydown', (e) => {
+                    armIdleHint(); // any key counts as activity, game key or not
+                    if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!currentPiece) return;
+                    if (e.key === 'ArrowLeft') tryMove(0, -1);
+                    else if (e.key === 'ArrowRight') tryMove(0, 1);
+                    else if (e.key === 'ArrowUp') hardDrop();
+                    else if (e.code === 'KeyZ') tryRotate(-1);
+                    else if (e.code === 'KeyX') tryRotate(1);
+                    else if (e.key === 'Shift') holdPiece();
+                    else if (e.key === 'ArrowDown' && !fastDrop) {
+                        fastDrop = true;
+                        // Real Tetris soft drop is immediately responsive: the piece steps
+                        // down (or locks, if it's already resting) the moment the key is
+                        // pressed, not after whatever was left of the previous, slower
+                        // gravity interval. tick() does exactly that move-or-lock step and
+                        // reschedules itself at the new fastDrop-aware delay, so calling it
+                        // directly here (instead of just rescheduling the pending timer)
+                        // removes the wait entirely rather than just shortening it.
+                        tick();
+                    }
+                }, { capture: true });
+                window.addEventListener('keyup', (e) => {
+                    if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.key === 'ArrowDown' && fastDrop) {
+                        fastDrop = false;
+                        // Without this, the timer already pending from the last fast tick
+                        // still fires once more at the fast interval before the next tick
+                        // naturally reschedules at the slow rate - an extra fast-feeling row
+                        // right after release, which reads as sluggish/unresponsive.
+                        // Rescheduling immediately at the slow delay removes that extra step.
+                        if (timeoutId !== null) scheduleTick(dropDelay());
+                    }
+                }, { capture: true });
+            })();
+        }
+        /*SURFER_SETUP_HOOKS*/
+    </script>
+    
+    <!-- this is the base url relative to which other urls will be constructed. trunk will insert this from the public-url option -->
+    <base href="./" />
+
+
+    <script>
+        function on_surfer_error(msg) {
+            console.log("Setting error message")
+            document.getElementById("error_message").innerHTML = msg
+            document.getElementById("error_container").style.display = "block"
+        }
+        window.on_surfer_error = on_surfer_error;
+    </script>
+
+
+    
+    
+    
+    
+
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="white">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#404040">
+
+    <style>
+        html {
+            /* Remove touch delay: */
+            touch-action: manipulation;
+        }
+
+        body {
+            /* Light mode background color for what is not covered by the egui canvas,
+            or where the egui canvas is translucent. */
+            background: #909090;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            body {
+                /* Dark mode background color for what is not covered by the egui canvas,
+                or where the egui canvas is translucent. */
+                background: #404040;
+            }
+        }
+
+        /* Allow canvas to fill entire web page: */
+        html,
+        body {
+            overflow: hidden;
+            margin: 0 !important;
+            padding: 0 !important;
+            height: 100%;
+            width: 100%;
+        }
+
+        /* Make canvas fill entire document: */
+        canvas {
+            margin-right: auto;
+            margin-left: auto;
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .centered {
+            margin-right: auto;
+            margin-left: auto;
+            display: block;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #f0f0f0;
+            font-size: 24px;
+            font-family: Ubuntu-Light, Helvetica, sans-serif;
+            text-align: center;
+        }
+
+        /* ---------------------------------------------- */
+        /* Loading animation from https://loading.io/css/ */
+        .lds-dual-ring {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+        }
+
+        .lds-dual-ring:after {
+            content: " ";
+            display: block;
+            width: 24px;
+            height: 24px;
+            margin: 0px;
+            border-radius: 50%;
+            border: 3px solid #fff;
+            border-color: #fff transparent #fff transparent;
+            animation: lds-dual-ring 1.2s linear infinite;
+        }
+
+        @keyframes lds-dual-ring {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        #error_container {
+            padding: 1em;
+            border-radius: 0.5em;
+            margin: 0px auto;
+            max-width: 980px;
+            color: #ffffff;
+            background-color: black;
+            position: relative;
+            height: 90%;
+            overflow: scroll;
+        }
+
+        #error_container a {
+            color: #ff9999;
+        }
+
+        #error_message {
+            overflow: scroll;
+            white-space: break-spaces;
+        }
+    </style>
+<link rel="modulepreload" href="./surfer.js" crossorigin="anonymous" integrity="sha384-kN5mYIxmjsiMi2yn4SyZ5TdhHDaxSdzNl2KaGrrYdaj/LKHSOOUombwheC+q2MlN"><link rel="preload" href="./surfer_bg.wasm" crossorigin="anonymous" integrity="sha384-GTV+3cvKF8o53XFzzEaGn21QSX06DQsJhMFTQIpgzureTeasvn7D0EgHmEzFcT5Q" as="fetch" type="application/wasm"></head>
+
+<body>
+    <!-- The WASM code will resize the canvas dynamically -->
+    <!-- the id is hardcoded in main.rs . so, make sure both match. -->
+    <canvas id="the_canvas_id"></canvas>
+
+    <div id="error_container" style="display: none;">
+        <h1>Sorry, Surfer crashed 🔥</h1>
+        <p>
+            Something caused Surfer to crash. Please report the error on
+            <a href="https://gitlab.com/surfer-project/surfer/-/issues/new">
+                gitlab
+            </a>
+        </p>
+        <p>
+            Any report is appreciated, but it is extra helpful if you can attach the waveform that caused
+            the crash and/or the steps to reproduce the crash.
+        </p>
+        <h3>
+            Backtrace:
+        </h3>
+        <div class="error_container">
+            <!-- This is filled in by javascript -->
+            <code id="error_message"></code>
+        </div>
+    </div>
+
+    <!-- Register the message listener system -->
+    <script src="integration.js"></script>
+    <script>
+        register_message_listener()
+    </script>
+
+    <!--Register Service Worker. this will cache the wasm / js scripts for offline use (for PWA functionality). -->
+    <!-- Force refresh (Ctrl + F5) to load the latest files instead of cached files  -->
+    <script>
+        // We disable caching during development so that we always view the latest version.
+        if ('serviceWorker' in navigator && window.location.hash !== "#dev") {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('sw.js');
+            });
+        }
+    </script>
+</body>
+
+</html>
+
+<!-- Powered by egui: https://github.com/emilk/egui/ -->
