@@ -51,6 +51,19 @@ struct Callback {
     executed: tokio::sync::oneshot::Sender<()>,
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = window, js_name = surfer_wave_canvas_clicked)]
+    fn surfer_wave_canvas_clicked_js() -> Result<(), JsValue>;
+}
+
+/// Tells the host page that the user clicked (or started a drag) on a waveform
+/// canvas, by calling `window.surfer_wave_canvas_clicked()` if the page defines
+/// it. Silently does nothing if it doesn't - it's an optional page hook.
+pub fn notify_wave_canvas_clicked() {
+    let _ = surfer_wave_canvas_clicked_js();
+}
+
 pub fn try_repaint() {
     if let Some(ctx) = EGUI_CONTEXT.read().unwrap().as_ref() {
         ctx.request_repaint();

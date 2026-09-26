@@ -25,7 +25,7 @@ use epaint::{
     text::{FontId, LayoutJob, TextFormat, TextWrapMode},
 };
 use itertools::Itertools;
-use num::{BigUint, One, Zero};
+use num::{BigInt, BigUint, One, Zero};
 use tracing::info;
 
 use surfer_translation_types::{
@@ -1748,6 +1748,14 @@ impl SystemState {
             &meta,
         );
 
+        // Rows with wave-cell overrides are drawn from the overrides instead of the
+        // real trace (see `draw_wave_overrides`), so report those same values here.
+        if let Some(value) =
+            self.wave_override_value(waves, displayed_field_ref, meta.num_bits, ucursor)
+        {
+            return Some(value);
+        }
+
         let wave_container = waves.inner.as_waves().unwrap();
         let query_result = wave_container
             .query_variable(variable, ucursor)
@@ -1787,6 +1795,12 @@ impl SystemState {
             &prev_val,
         );
 
+        self.format_transition(curr, prev)
+    }
+
+    /// Formats the value at a transition according to the configured
+    /// `TransitionValue` mode.
+    fn format_transition(&self, curr: Option<String>, prev: Option<String>) -> Option<String> {
         match self.transition_value() {
             TransitionValue::Previous => Some(format!("←{}", prev.unwrap_or_default())),
             TransitionValue::Both => match (curr, prev) {
@@ -1795,8 +1809,50 @@ impl SystemState {
                 (Some(curr_val), None) => Some(format!("→ {curr_val}")),
                 _ => None,
             },
-            TransitionValue::Next => curr, // This will never happen due to the earlier check
+            TransitionValue::Next => curr,
         }
+    }
+
+    /// The value a wave-cell override row shows at `ucursor`, matching how
+    /// `draw_wave_overrides` renders it: the last placed value at or before the
+    /// cursor, or the row's implicit leading value ("0" for 1-bit rows, "x"
+    /// otherwise) before the first one. `None` if the row has no overrides, or
+    /// for sub-fields, which overrides don't cover.
+    fn wave_override_value(
+        &self,
+        waves: &WaveData,
+        displayed_field_ref: &DisplayedFieldRef,
+        num_bits: Option<u32>,
+        ucursor: &BigUint,
+    ) -> Option<String> {
+        if waves.wave_overrides.is_empty() || !displayed_field_ref.field.is_empty() {
+            return None;
+        }
+        let vidx = waves
+            .items_tree
+            .iter_visible()
+            .position(|node| node.item_ref == displayed_field_ref.item)
+            .map(VisibleItemIndex)?;
+        let row = waves.wave_overrides.get(&vidx)?;
+
+        let leading = if matches!(num_bits, Some(n) if n != 1) { "x" } else { "0" };
+        let value_at = |t: &BigInt| {
+            row.range(..=t)
+                .next_back()
+                .map_or(leading, |(_, cell)| cell.value.as_str())
+                .to_string()
+        };
+
+        let cursor = BigInt::from(ucursor.clone());
+        let curr = value_at(&cursor);
+        if !row.contains_key(&cursor)
+            || ucursor.is_zero()
+            || self.transition_value() == TransitionValue::Next
+        {
+            return Some(curr);
+        }
+        let prev = value_at(&(cursor - 1));
+        self.format_transition(Some(curr), Some(prev))
     }
 
     fn translate_query_result(

@@ -162,8 +162,78 @@ pattern_script = """
                 const [controls1Vidx, controls2Vidx] = await Promise.all(
                     ['scopetris_top.z_controls_1', 'scopetris_top.z_controls_2'].map(resolve)
                 );
-                setCell(controls1Vidx, 0, 'Left/Right: Move   |   Down: Soft Drop   |   Up: Hard Drop', null);
-                setCell(controls2Vidx, 0, 'Z: Rotate Left   |   X: Rotate Right   |   Shift: Hold', null);
+                const CONTROLS_TEXT_1 = 'Left/Right: Move   |   Down: Soft Drop   |   Up: Hard Drop';
+                const CONTROLS_TEXT_2 = 'Z: Rotate Left   |   X: Rotate Right   |   Shift: Hold';
+                const renderControls = (color) => {
+                    setCell(controls1Vidx, 0, CONTROLS_TEXT_1, color);
+                    setCell(controls2Vidx, 0, CONTROLS_TEXT_2, color);
+                };
+                renderControls(null);
+
+                // Controls hint: blink the legend bright/dark at 1Hz (500ms per phase) to
+                // point the user at the keyboard controls, in two situations:
+                // - Clicking the waveform canvas (the Rust side calls
+                //   window.surfer_wave_canvas_clicked() on any click/drag start there - see
+                //   notify_wave_canvas_clicked in libsurfer/src/wasm_api.rs) suggests the
+                //   user hasn't realized the game is keyboard-driven: CLICK_BLINKS cycles.
+                //   A click mid-blink restarts the count.
+                // - IDLE_HINT_MS with no key pressed: IDLE_BLINKS cycles. The idle timer
+                //   re-arms on every keydown and after each blink finishes, so a user who
+                //   stays idle gets reminded again - at most IDLE_HINT_MAX times in total.
+                // Both only apply during the first CONTROLS_HINT_PIECES pieces; once that
+                // many have locked, any running blink stops early and the hint is off
+                // for good (stopControlsHints).
+                const CONTROLS_HINT_PIECES = 3, CLICK_BLINKS = 3;
+                const IDLE_BLINKS = 5, IDLE_HINT_MS = 5000, IDLE_HINT_MAX = 2;
+                const CONTROLS_BRIGHT = [255, 255, 0, 255], CONTROLS_DARK = [70, 70, 70, 255];
+                let piecesLocked = 0;
+                let hintsActive = false; // set once the first piece spawns, after the intro
+                let controlsBlinkId = null;
+                let idleTimerId = null;
+                let idleHintsFired = 0;
+                const stopControlsBlink = () => {
+                    if (controlsBlinkId === null) return;
+                    clearInterval(controlsBlinkId);
+                    controlsBlinkId = null;
+                    renderControls(null);
+                };
+                // (Re)starts the idle countdown. Skipped while a blink is running - the
+                // blink re-arms it itself when it finishes.
+                const armIdleHint = () => {
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    if (!hintsActive || controlsBlinkId !== null || idleHintsFired >= IDLE_HINT_MAX) return;
+                    idleTimerId = setTimeout(() => {
+                        idleHintsFired += 1;
+                        startControlsBlink(IDLE_BLINKS);
+                    }, IDLE_HINT_MS);
+                };
+                const startControlsBlink = (cycles) => {
+                    stopControlsBlink();
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    let phase = 0; // even = bright, odd = dark
+                    renderControls(CONTROLS_BRIGHT);
+                    controlsBlinkId = setInterval(() => {
+                        phase += 1;
+                        if (phase < cycles * 2) {
+                            renderControls(phase % 2 === 0 ? CONTROLS_BRIGHT : CONTROLS_DARK);
+                            return;
+                        }
+                        stopControlsBlink();
+                        armIdleHint();
+                    }, 500);
+                };
+                const stopControlsHints = () => {
+                    hintsActive = false;
+                    clearTimeout(idleTimerId);
+                    idleTimerId = null;
+                    stopControlsBlink();
+                };
+                window.surfer_wave_canvas_clicked = () => {
+                    if (piecesLocked >= CONTROLS_HINT_PIECES) return;
+                    startControlsBlink(CLICK_BLINKS);
+                };
 
                 // Each piece: color plus 4 rotation states, each a list of [row,col]
                 // cell offsets within a 4x4 box. Standard SRS-like flat/spawn shapes.
@@ -180,7 +250,7 @@ pattern_script = """
                         [[1, 1], [1, 2], [2, 1], [2, 2]],
                         [[1, 1], [1, 2], [2, 1], [2, 2]],
                     ] },
-                    T: { color: [160, 0, 240, 255], rotations: [
+                    T: { color: [200, 90, 255, 255], rotations: [
                         [[0, 1], [1, 0], [1, 1], [1, 2]],
                         [[0, 1], [1, 1], [1, 2], [2, 1]],
                         [[1, 0], [1, 1], [1, 2], [2, 1]],
@@ -198,7 +268,7 @@ pattern_script = """
                         [[1, 0], [1, 1], [2, 1], [2, 2]],
                         [[0, 1], [1, 0], [1, 1], [2, 0]],
                     ] },
-                    J: { color: [0, 0, 255, 255], rotations: [
+                    J: { color: [60, 140, 255, 255], rotations: [
                         [[0, 0], [1, 0], [1, 1], [1, 2]],
                         [[0, 1], [0, 2], [1, 1], [2, 1]],
                         [[1, 0], [1, 1], [1, 2], [2, 2]],
@@ -470,6 +540,7 @@ pattern_script = """
                     }
                     const spin = detectSpin();
                     currentPiece = null;
+                    if (++piecesLocked >= CONTROLS_HINT_PIECES) stopControlsHints();
                     const rows = fullRows();
                     if (rows.length > 0) {
                         renderAll(); // show the completed row(s) before they start deleting
@@ -568,11 +639,14 @@ pattern_script = """
                     await animateClear(Array.from({ length: ROWS }, (_, i) => i));
                     renderScore();
                     spawnPiece();
+                    hintsActive = true;
+                    armIdleHint();
                 };
                 animateIntro();
 
                 const gameKeys = ['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'KeyZ', 'KeyX', 'Shift'];
                 window.addEventListener('keydown', (e) => {
+                    armIdleHint(); // any key counts as activity, game key or not
                     if (!gameKeys.includes(e.code) && !gameKeys.includes(e.key)) return;
                     e.preventDefault();
                     e.stopPropagation();

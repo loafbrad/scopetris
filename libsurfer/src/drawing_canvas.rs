@@ -781,6 +781,8 @@ impl SystemState {
             || response.drag_started()
         {
             msgs.push(Message::SetActiveViewport(viewport_idx));
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_api::notify_wave_canvas_clicked();
         }
 
         if ui.ui_contains_pointer() {
